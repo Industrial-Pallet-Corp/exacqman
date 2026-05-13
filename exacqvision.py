@@ -27,7 +27,7 @@ class Exacqvision:
         session (str): Session ID for authenticated API calls.
     """
     
-    def __init__(self, base_url:str, username: str, password: str, timezone: ZoneInfo):
+    def __init__(self, base_url: str, username: str, password: str, timezone: ZoneInfo):
         self.base_url = base_url
         self.timezone = timezone
         self.session = self.login(username, password)
@@ -64,7 +64,7 @@ class Exacqvision:
         if self.session:
             url = f"{self.base_url}/v1/logout.web?s={self.session}"
             response = requests.request("POST", url)
-            return(response.text)
+            return response.text
         else:
             print("No active session to logout.")
 
@@ -142,7 +142,7 @@ class Exacqvision:
             raise ExacqvisionError(f"Export request failed: {str(e)}")
 
 
-    def export_request(self, camera_id: int, start: datetime, stop: datetime, name: str=None) -> str:
+    def export_request(self, camera_id: int, start: datetime, stop: datetime, name: str = None) -> str:
         """
         Initiates a video export request.
 
@@ -184,7 +184,7 @@ class Exacqvision:
             raise ExacqvisionError(f"Export request failed: {str(e)}")
 
 
-    def export_status(self, export_id:str) -> tuple[bool,int]:
+    def export_status(self, export_id: str) -> tuple[bool, int]:
         """
         Checks the status of an export request.
 
@@ -203,7 +203,7 @@ class Exacqvision:
         return progress == 100, progress
 
 
-    def export_download(self, export_id:str) -> str:
+    def export_download(self, export_id: str) -> str:
         """
         Downloads the completed video export.
 
@@ -250,13 +250,13 @@ class Exacqvision:
         return file_name
 
 
-    def export_delete(self, export_id:str):
+    def export_delete(self, export_id: str):
         '''Deletes an export request from the server.'''
         url = f"{self.base_url}/v1/export.web?export={export_id}&action=finish"
 
         response = requests.request("GET", url)
-        
-        return(response.text)
+
+        return response.text
 
 
     def get_video(self, camera: int, start: datetime, stop: datetime, video_filename: str, num_of_retries: int = 5):
@@ -359,10 +359,10 @@ class Exacqvision:
         
         # Add timezone info to start and stop datetimes to prevent crashing due to them being offset-naive
         start = start.replace(tzinfo=self.timezone)
-        stop =  stop.replace(tzinfo=self.timezone)
+        stop = stop.replace(tzinfo=self.timezone)
 
         # Remove timestamps outside of the original start and stop times.
-        finished_timestamps = [x for x in unique_timestamps if x>=start and x<=stop]
+        finished_timestamps = [x for x in unique_timestamps if x >= start and x <= stop]
 
         return finished_timestamps
     

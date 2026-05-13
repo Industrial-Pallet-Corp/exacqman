@@ -149,12 +149,19 @@ class ExacqManService:
         its message when the subprocess exits non-zero. Non-JSON lines (e.g.
         Python tracebacks, stray prints) are logged and otherwise ignored.
         """
+        # `process.stdout` is typed Optional[StreamReader] because asyncio only
+        # attaches a reader when stdout=PIPE. We always pass PIPE, so this is a
+        # programmer error if ever None; assert eagerly to keep type checkers
+        # happy and catch a misconfigured subprocess immediately.
+        stdout = process.stdout
+        assert stdout is not None, "subprocess must be started with stdout=PIPE"
+
         buffer = b""
         current_stage: Optional[str] = None
         last_error: Optional[Dict[str, Any]] = None
 
         while True:
-            chunk = await process.stdout.read(8192)
+            chunk = await stdout.read(8192)
             if not chunk:
                 if buffer:
                     trailing = buffer.decode("utf-8", errors="replace").strip()

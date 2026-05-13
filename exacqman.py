@@ -122,119 +122,113 @@ def validate_config(config: ConfigParser) -> bool:
     """
     Validates the configuration file for required sections and values.
 
+    Fatal validation problems are emitted as a single `reporter.error` event
+    (so they surface to humans on the CLI and to programmatic consumers like
+    the web service through the JSON event stream). Non-fatal problems are
+    emitted as individual `reporter.warning` events.
+
     Args:
         config (ConfigParser): Parsed configuration object.
 
     Returns:
         bool: True if the configuration is valid, False otherwise.
-
-    Prints error messages for missing or invalid entries and exits if fatal errors are found.
     """
-    errors = []
-    fatal = False
+    reporter = get_reporter()
+    fatal_errors: list[str] = []
+    warnings: list[str] = []
 
     # Check Sections first
-
     sections = ['Auth', 'Network', 'Cameras', 'Settings']
 
     for section in sections:
         if not config.has_section(section):
-            errors.append(f'[{section}] section is missing from config')
-            fatal = True
-    
-    if errors:
-        print(f"{'\n'.join(errors)}")
-    
-    if fatal:
-        return False # False because config is not valid
+            fatal_errors.append(f'[{section}] section is missing from config')
+
+    # If any required section is missing, downstream checks would crash; bail
+    # now and surface the section-level errors.
+    if fatal_errors:
+        reporter.error(
+            "ConfigError",
+            "Config validation failed:\n" + "\n".join(fatal_errors),
+        )
+        return False
 
     # Validate entries individually
     if 'user' not in config['Auth'] or not config['Auth']['user'].strip():
-        errors.append('user is missing or empty')
-        fatal = True
-    
+        fatal_errors.append('user is missing or empty')
+
     if 'password' not in config['Auth'] or not config['Auth']['password'].strip():
-        errors.append('password is missing or empty')
-        fatal = True
+        fatal_errors.append('password is missing or empty')
 
     for server_name, server_ip in config['Network'].items():
         if not server_ip.strip():
-            errors.append(f'Server: {server_name} has no server_ip')
-            fatal = True
+            fatal_errors.append(f'Server: {server_name} has no server_ip')
 
     if 'timezone' not in config['Settings'] or not config['Settings']['timezone'].strip():
-        errors.append('timezone is missing or empty')
-        fatal = True
+        fatal_errors.append('timezone is missing or empty')
 
     if 'timelapse_multiplier' not in config['Settings'] or not config['Settings']['timelapse_multiplier'].strip():
-        errors.append('timelapse_multiplier is missing or empty. Program will default to 10') 
+        warnings.append('timelapse_multiplier is missing or empty. Program will default to 10')
     else:
         try:
-            if (int(config['Settings']['timelapse_multiplier']) <= 0):
-                errors.append('timelapse_multiplier must be a positive integer')
-                fatal = True
+            if int(config['Settings']['timelapse_multiplier']) <= 0:
+                fatal_errors.append('timelapse_multiplier must be a positive integer')
         except ValueError:
-            errors.append('timelapse_multiplier must be a positive integer')
-            fatal = True
+            fatal_errors.append('timelapse_multiplier must be a positive integer')
 
     if 'compression_level' not in config['Settings'] or not config['Settings']['compression_level'].strip():
-        errors.append('compression_level is missing or empty. Program will default to medium') 
+        warnings.append('compression_level is missing or empty. Program will default to medium')
 
     crop_dimensions = config['Settings'].get('crop_dimensions', '').strip()
     if crop_dimensions:
-        
         try:
             crop_dimensions = literal_eval(crop_dimensions)
             # Check if all values are integers
             if not all(isinstance(coord, int) for point in crop_dimensions for coord in point):
-                errors.append('crop_dimensions should contain integers only')
+                warnings.append('crop_dimensions should contain integers only')
         except ValueError:
-            errors.append('crop_dimensions should follow the format: ((x, y), (width, height))')
-    
+            warnings.append('crop_dimensions should follow the format: ((x, y), (width, height))')
+
     if 'font_weight' not in config['Settings'] or not config['Settings']['font_weight'].strip():
-        errors.append('font_weight is missing or empty. Program will default to 2')
+        warnings.append('font_weight is missing or empty. Program will default to 2')
     else:
         try:
-            if (int(config['Settings']['font_weight']) <= 0):
-                errors.append('font_weight must be a positive integer')
-                fatal = True
+            if int(config['Settings']['font_weight']) <= 0:
+                fatal_errors.append('font_weight must be a positive integer')
         except ValueError:
-            errors.append('font_weight must be a postive integer')
-            fatal = True
+            fatal_errors.append('font_weight must be a positive integer')
 
     if 'caption' not in config['Settings']:
-        errors.append('caption is missing from Settings header.')
+        warnings.append('caption is missing from Settings header.')
     else:
         if len(config['Settings']['caption']) > Settings.caption_limit:
-            errors.append(f'Caption Character limit of {Settings.caption_limit} exceeded.')
-            fatal = True
+            fatal_errors.append(f'Caption character limit of {Settings.caption_limit} exceeded.')
 
     # Only validate Runtime section if it exists
     if config.has_section('Runtime') and 'server' in config['Runtime']:
         server = config['Runtime']['server']
         if server not in config['Network']:
-            errors.append(f'Server {server} not found in the Network list')
-            fatal = True
+            fatal_errors.append(f'Server {server} not found in the Network list')
 
     for camera_number, camera_value in config['Cameras'].items():
         if not camera_value.strip():
-            errors.append(f'Camera {camera_number} has no id')
-            fatal = True
+            fatal_errors.append(f'Camera {camera_number} has no id')
         else:
             try:
                 int(camera_value)
             except ValueError:
-                errors.append(f'Camera ID {camera_number} must be an integer')
-                fatal = True
+                fatal_errors.append(f'Camera ID {camera_number} must be an integer')
 
+    for warning in warnings:
+        reporter.warning(warning)
 
-    if errors:
-        print(f"{'\n'.join(errors)}")
-    
-    if fatal:
+    if fatal_errors:
+        reporter.error(
+            "ConfigError",
+            "Config validation failed:\n" + "\n".join(fatal_errors),
+        )
         return False
-    else:
-        return True
+    return True
 
 
 def process_video(original_video_path: str, output_video_path: str = None, timestamps: list[datetime] = None) -> str:
