@@ -31,8 +31,8 @@ class Settings:
     crop: bool = False                  # Does the video need cropped? Crop_dimensions only matter if this is True.
     crop_dimensions: tuple[tuple[int,int],tuple[int,int]] = None # (x,y)(width,height) where (x,y) = top left of rectangle
     font_weight: int = 2                # Font thickness
-    caption: str = None                 # Caption above the timestamp
-    caption_limit = 40                  # Max number of characters for caption
+    caption: str = None                 # Optional caption rendered below the timestamp
+    caption_limit = 25                  # Max number of characters for caption
 
     server: str = None                  # Server name (Should match to one of the servers in config file under [Network])
     server_ip: str = None               # IP address of the Exacqman server
@@ -94,7 +94,7 @@ class Settings:
             crop=bool(set_value(arg_value='crop', cls_value=cls.crop)),
             crop_dimensions=literal_eval(config.get('Settings','crop_dimensions',fallback='')) if config.get('Settings', 'crop_dimensions', fallback='') else None,
             font_weight=int(set_value(config_value=config.get('Settings','font_weight',fallback=''), cls_value=cls.font_weight)),
-            caption=set_value(arg_value='caption', config_value=config.get('Settings', 'caption', fallback='').upper(),cls_value=cls.caption),
+            caption=set_value(arg_value='caption', config_value=config.get('Settings', 'caption', fallback=''), cls_value=cls.caption),
 
             server=server,
             server_ip=config['Network'].get(server) if 'Network' in config and server else None,
@@ -200,9 +200,8 @@ def validate_config(config: ConfigParser) -> bool:
 
     if 'caption' not in config['Settings']:
         warnings.append('caption is missing from Settings header.')
-    else:
-        if len(config['Settings']['caption']) > Settings.caption_limit:
-            fatal_errors.append(f'Caption character limit of {Settings.caption_limit} exceeded.')
+    # Caption length is enforced after merging args + config (see main()), so
+    # CLI overrides and config-only values are both bounded by the same rule.
 
     # Only validate Runtime section if it exists
     if config.has_section('Runtime') and 'server' in config['Runtime']:
@@ -386,6 +385,36 @@ def process_video(original_video_path: str, output_video_path: str = None, times
 
     font_scale = calculate_font_scale(crop_width)
 
+    # Pre-compute caption layout once. The caption text and font scale don't
+    # change frame-to-frame, so measuring inside the render loop would be
+    # wasteful. We anchor the caption directly below the timestamp using a
+    # natural single-line leading (~25% of the timestamp's text height).
+    caption_font_scale = font_scale * 0.8 if settings.caption else None
+    caption_x = None
+    caption_y_offset = None
+    if settings.caption:
+        (caption_w, caption_h), _ = cv2.getTextSize(
+            settings.caption,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            caption_font_scale,
+            settings.font_weight,
+        )
+        # Use a representative timestamp string to derive the line gap. Real
+        # per-frame timestamps differ only in their digit values so their
+        # vertical metrics are stable.
+        sample_ts = datetime(2025, 1, 1, 12, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
+        (_, sample_ts_h), sample_ts_baseline = cv2.getTextSize(
+            sample_ts,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            settings.font_weight,
+        )
+        line_gap = max(2, int(sample_ts_h * 0.25))
+        caption_x = (crop_width - caption_w) // 2
+        # Offset from the timestamp baseline (cv2 putText's y arg) down to the
+        # caption's own baseline: descender of the timestamp + gap + caption height.
+        caption_y_offset = sample_ts_baseline + line_gap + caption_h
+
     reporter.stage(
         "timelapsing",
         "Timelapsing footage",
@@ -413,9 +442,17 @@ def process_video(original_video_path: str, output_video_path: str = None, times
             timestamp_string = current_timestamp.strftime('%Y-%m-%d %H:%M:%S')
             x_pos, y_pos = calculate_xy_text_position(crop_height, crop_width, timestamp_string, font_scale)
             cv2.putText(finished_frame, timestamp_string, (x_pos, y_pos), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), settings.font_weight, cv2.LINE_AA)
-            caption_font_scale = font_scale*0.8
-            caption_x, caption_y = calculate_xy_text_position(crop_height*.85, crop_width, settings.caption, caption_font_scale)
-            cv2.putText(finished_frame, settings.caption, (caption_x, caption_y), cv2.FONT_HERSHEY_SIMPLEX, caption_font_scale, (255, 255, 255), settings.font_weight, cv2.LINE_AA)
+            if settings.caption:
+                cv2.putText(
+                    finished_frame,
+                    settings.caption,
+                    (caption_x, y_pos + caption_y_offset),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    caption_font_scale,
+                    (255, 255, 255),
+                    settings.font_weight,
+                    cv2.LINE_AA,
+                )
 
         if count % multiplier == 0:
             writer.write(finished_frame)
@@ -610,6 +647,18 @@ def main():
         config = import_config(config_file)
 
     settings = Settings.from_args_and_config(args, config) if config else Settings.from_args_and_config(args)
+
+    # Enforce caption length on the effective post-merge value so the rule
+    # applies uniformly regardless of source (CLI --caption or [Settings] caption).
+    if settings.caption and len(settings.caption) > Settings.caption_limit:
+        reporter.error(
+            "CaptionTooLong",
+            (
+                f"Caption is {len(settings.caption)} characters; the maximum "
+                f"allowed is {Settings.caption_limit}."
+            ),
+        )
+        exit(1)
 
     try:
         if args.command == 'extract':
