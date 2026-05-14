@@ -1,15 +1,14 @@
 from dataclasses import dataclass
-from configparser import ConfigParser
 from moviepy import VideoFileClip
 from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as duparse
 from zoneinfo import ZoneInfo
-from ast import literal_eval
 from exacqvision import Exacqvision, ExacqvisionError
 from progress import init_reporter, get_reporter
-import cv2
 import argparse
+import cv2
+import tomllib
 
 
 @dataclass
@@ -22,22 +21,23 @@ class Settings:
     user: str = None
     password: str = None
 
-    servers: dict = None                # Dictionary of servers -> server ip's
-    cameras: dict = None                # Dictionary of camera aliases -> camera id's
+    servers: dict = None                # {server_name: url} for all configured servers
+    cameras: dict = None                # {server_name: {alias: {id, crop_dimensions?}}} nested map
 
     timelapse_multiplier: int = 10      # Must be a positive int
     compression_level: str = 'medium'   # Should be 'low', 'medium', or 'high'
     timezone: str = None
-    crop: bool = False                  # Does the video need cropped? Crop_dimensions only matter if this is True.
-    crop_dimensions: tuple[tuple[int,int],tuple[int,int]] = None # (x,y)(width,height) where (x,y) = top left of rectangle
+    crop: bool = False                  # Does the video need cropped? Crop dimensions only matter if this is True.
+    default_crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Fallback crop applied when the selected camera has no per-camera override
+    crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Effective crop for this run: per-camera override if set, else default
     font_weight: int = 2                # Font thickness
     caption: str = None                 # Optional caption rendered below the timestamp
     caption_limit = 25                  # Max number of characters for caption
 
-    server: str = None                  # Server name (Should match to one of the servers in config file under [Network])
-    server_ip: str = None               # IP address of the Exacqman server
-    camera_alias: str = None            # Camera name (Should match to one of the cameras in config file under [Cameras])
-    camera_id: str = None               # Camera Id for Exacqman server
+    server: str = None                  # Server name (must match a key under [servers])
+    server_ip: str = None               # URL of the chosen Exacqvision server
+    camera_alias: str = None            # Camera alias (must match a [servers.<server>.cameras.<alias>] entry)
+    camera_id: int = None               # Camera ID resolved from the chosen alias on the chosen server
     input_filename: str = None          # Video filename that needs processed
     output_filename: str = None         # Desired name of output file (will always be .mp4)
     date: str = None                    # MM/DD (e.g. '3/11')
@@ -45,107 +45,209 @@ class Settings:
     end_time: str = None                # End time of video (e.g. '6 pm', '6:30pm', '18:30')
 
     @classmethod
-    def from_args_and_config(cls, args: argparse.Namespace, config: ConfigParser = ConfigParser()) -> 'Settings':
-        """Merge argparse, config file, and defaults in that priority."""
-        
-        def set_value(arg_value = None, config_value = None, cls_value = None, required = False):
-            """
-            Sets correct value respecting priority: command-line args > [Runtime] config > defaults
-            Args:
-                arg_value: Name of command-line argument
-                config_value: Value from [Runtime] config section  
-                cls_value: Default value from class
-                required: If True, raise error if no value found
-            """
-            # First priority: command-line argument
+    def from_args_and_config(cls, args: argparse.Namespace, config: dict = None) -> 'Settings':
+        """Merge CLI args, parsed TOML config, and class defaults in that priority.
+
+        `config` is the dict returned by ``tomllib.load``. Missing keys at any
+        level resolve to ``None`` and fall through to the next priority source.
+        """
+        config = config or {}
+
+        def set_value(arg_value=None, config_value=None, cls_value=None, required=False):
+            """Pick the highest-priority non-empty value: arg > config > default."""
             if arg_value:
                 arg_val = getattr(args, arg_value, None)
                 if arg_val is not None and str(arg_val).strip():
                     return arg_val
-            
-            # Second priority: [Runtime] config value (only if not empty)
             if config_value is not None and str(config_value).strip():
                 return config_value
-            
-            # Third priority: class default
             if cls_value is not None:
                 return cls_value
-            
-            # Required parameter missing
             if required:
                 raise ValueError(f"Required parameter {arg_value or 'config'} is missing")
-            
             return None
 
-        # Calculate server and camera_alias first for use in server_ip and camera_id
-        server = set_value(arg_value='server', config_value=config.get('Runtime', 'server', fallback='') if config.has_section('Runtime') else None, cls_value=cls.server)
-        camera_alias = set_value(arg_value='camera_alias', config_value=config.get('Runtime','camera_alias',fallback='') if config.has_section('Runtime') else None, cls_value=cls.camera_alias)
+        auth = config.get('auth', {})
+        servers_table = config.get('servers', {})
+        settings_table = config.get('settings', {})
+        runtime = config.get('runtime', {})
 
-        # Build settings with priority: args > config > default
+        # Build the flat name->url map and the nested cameras-by-server map.
+        # Per-camera crop dimensions are normalized to tuple-of-tuples so the
+        # rest of the code can keep treating crop_dimensions as a tuple.
+        servers_by_name: dict[str, str] = {}
+        cameras_by_server: dict[str, dict[str, dict]] = {}
+        for srv_name, srv_data in servers_table.items():
+            if not isinstance(srv_data, dict):
+                continue
+            url = srv_data.get('url')
+            if isinstance(url, str) and url.strip():
+                servers_by_name[srv_name] = url
+            cam_map: dict[str, dict] = {}
+            for alias, cam_data in srv_data.get('cameras', {}).items():
+                if not isinstance(cam_data, dict):
+                    continue
+                entry: dict = {'id': cam_data.get('id')}
+                cam_crop = cam_data.get('crop_dimensions')
+                if cam_crop is not None:
+                    entry['crop_dimensions'] = tuple(tuple(pt) for pt in cam_crop)
+                # TOML keys are always strings; explicit str() is defensive for
+                # cases where a caller passes a raw int alias through args.
+                cam_map[str(alias)] = entry
+            cameras_by_server[srv_name] = cam_map
+
+        # Resolve the active server and camera (args > runtime config > default).
+        server = set_value(
+            arg_value='server',
+            config_value=runtime.get('server'),
+            cls_value=cls.server,
+        )
+        camera_alias = set_value(
+            arg_value='camera_alias',
+            config_value=runtime.get('camera_alias'),
+            cls_value=cls.camera_alias,
+        )
+        if camera_alias is not None:
+            camera_alias = str(camera_alias)
+
+        server_ip = servers_by_name.get(server) if server else None
+        cam_entry = (
+            cameras_by_server.get(server, {}).get(camera_alias)
+            if (server and camera_alias) else None
+        )
+        camera_id = cam_entry.get('id') if cam_entry else None
+
+        # Resolve effective crop: per-camera override beats the global default.
+        default_crop = settings_table.get('default_crop_dimensions')
+        if default_crop is not None:
+            default_crop = tuple(tuple(pt) for pt in default_crop)
+        effective_crop = (cam_entry or {}).get('crop_dimensions') or default_crop
+
         return cls(
-            # User, password, server_ip, and cameras are exclusively from the config file so there is no set_value call.
-            user=config.get('Auth','user',fallback=''),
-            password=config.get('Auth','password',fallback=''),
-            cameras=config['Cameras'] if 'Cameras' in config else None,
+            user=auth.get('user', ''),
+            password=auth.get('password', ''),
+            servers=servers_by_name,
+            cameras=cameras_by_server,
 
-            timelapse_multiplier=int(set_value(arg_value='multiplier', config_value=config.get('Settings','timelapse_multiplier',fallback=''), cls_value=cls.timelapse_multiplier)),
-            compression_level=set_value(arg_value='quality', config_value=config.get('Settings','compression_level',fallback=''), cls_value=cls.compression_level),
-            timezone=set_value(config_value=config.get('Settings', 'timezone', fallback=''),cls_value=cls.timezone),
+            timelapse_multiplier=set_value(
+                arg_value='multiplier',
+                config_value=settings_table.get('timelapse_multiplier'),
+                cls_value=cls.timelapse_multiplier,
+            ),
+            compression_level=set_value(
+                arg_value='quality',
+                config_value=settings_table.get('compression_level'),
+                cls_value=cls.compression_level,
+            ),
+            timezone=set_value(
+                config_value=settings_table.get('timezone'),
+                cls_value=cls.timezone,
+            ),
             crop=bool(set_value(arg_value='crop', cls_value=cls.crop)),
-            crop_dimensions=literal_eval(config.get('Settings','crop_dimensions',fallback='')) if config.get('Settings', 'crop_dimensions', fallback='') else None,
-            font_weight=int(set_value(config_value=config.get('Settings','font_weight',fallback=''), cls_value=cls.font_weight)),
-            caption=set_value(arg_value='caption', config_value=config.get('Settings', 'caption', fallback=''), cls_value=cls.caption),
+            default_crop_dimensions=default_crop,
+            crop_dimensions=effective_crop,
+            font_weight=set_value(
+                config_value=settings_table.get('font_weight'),
+                cls_value=cls.font_weight,
+            ),
+            caption=set_value(
+                arg_value='caption',
+                config_value=runtime.get('caption'),
+                cls_value=cls.caption,
+            ),
 
             server=server,
-            server_ip=config['Network'].get(server) if 'Network' in config and server else None,
+            server_ip=server_ip,
             camera_alias=camera_alias,
-            camera_id=config['Cameras'].get(camera_alias) if 'Cameras' in config and camera_alias else None,
+            camera_id=camera_id,
             input_filename=set_value(arg_value='video_filename', cls_value=cls.input_filename),
-            output_filename=set_value(arg_value='output_name', config_value=config.get('Runtime','filename',fallback='') if config.has_section('Runtime') else None, cls_value=cls.output_filename),
-            date=set_value(arg_value='date', config_value=config.get('Runtime','date',fallback='') if config.has_section('Runtime') else None, cls_value=cls.date),
-            start_time=set_value(arg_value='start', config_value=config.get('Runtime','start_time',fallback='') if config.has_section('Runtime') else None, cls_value=cls.start_time),
-            end_time=set_value(arg_value='end', config_value=config.get('Runtime','end_time',fallback='') if config.has_section('Runtime') else None, cls_value=cls.end_time)
+            output_filename=set_value(
+                arg_value='output_name',
+                config_value=runtime.get('filename'),
+                cls_value=cls.output_filename,
+            ),
+            date=set_value(
+                arg_value='date',
+                config_value=runtime.get('date'),
+                cls_value=cls.date,
+            ),
+            start_time=set_value(
+                arg_value='start',
+                config_value=runtime.get('start_time'),
+                cls_value=cls.start_time,
+            ),
+            end_time=set_value(
+                arg_value='end',
+                config_value=runtime.get('end_time'),
+                cls_value=cls.end_time,
+            ),
         )
 
 
-def import_config(config_file: str) -> ConfigParser:
-    config = ConfigParser()
-    config.read(config_file)
+def import_config(config_file: str) -> dict:
+    """Load a TOML config file and run structural validation.
 
-    if validate_config(config) == False:
+    On validation failure, emits a `ConfigError` event through the active
+    reporter (see `validate_config`) and exits non-zero so callers --
+    including the web service that spawns this CLI -- can surface the
+    problem to the user.
+    """
+    try:
+        with open(config_file, "rb") as fp:
+            config = tomllib.load(fp)
+    except (FileNotFoundError, IsADirectoryError) as e:
+        get_reporter().error("ConfigError", f"Config file not found: {config_file} ({e})")
+        exit(1)
+    except tomllib.TOMLDecodeError as e:
+        get_reporter().error("ConfigError", f"Config file is not valid TOML: {config_file}: {e}")
+        exit(1)
+
+    if not validate_config(config):
         exit(1)
 
     return config
 
 
-def validate_config(config: ConfigParser) -> bool:
-    """
-    Validates the configuration file for required sections and values.
+def _is_valid_crop(crop) -> bool:
+    """Return True iff `crop` is shaped like ``[[x, y], [w, h]]`` with ints."""
+    if not isinstance(crop, list) or len(crop) != 2:
+        return False
+    for pair in crop:
+        if not isinstance(pair, list) or len(pair) != 2:
+            return False
+        for coord in pair:
+            # bool is a subclass of int in Python; reject it explicitly so a
+            # stray `true`/`false` in TOML doesn't masquerade as a coordinate.
+            if not isinstance(coord, int) or isinstance(coord, bool):
+                return False
+    return True
 
-    Fatal validation problems are emitted as a single `reporter.error` event
-    (so they surface to humans on the CLI and to programmatic consumers like
-    the web service through the JSON event stream). Non-fatal problems are
-    emitted as individual `reporter.warning` events.
+
+def validate_config(config: dict) -> bool:
+    """Validate a parsed TOML config dict.
+
+    Fatal problems are accumulated and emitted as a single ``reporter.error``
+    event; non-fatal nits are emitted as individual ``reporter.warning``
+    events. Both routes flow through the active reporter (TTY-pretty in
+    human mode, structured JSON for the web service).
 
     Args:
-        config (ConfigParser): Parsed configuration object.
+        config: dict returned by ``tomllib.load``.
 
     Returns:
-        bool: True if the configuration is valid, False otherwise.
+        True if the configuration is structurally valid, False otherwise.
     """
     reporter = get_reporter()
     fatal_errors: list[str] = []
     warnings: list[str] = []
 
-    # Check Sections first
-    sections = ['Auth', 'Network', 'Cameras', 'Settings']
+    # Top-level tables must exist before any sub-checks; otherwise downstream
+    # code raises confusing AttributeError/KeyError.
+    required_tables = ['auth', 'servers', 'settings']
+    for name in required_tables:
+        if not isinstance(config.get(name), dict):
+            fatal_errors.append(f'[{name}] table is missing from config')
 
-    for section in sections:
-        if not config.has_section(section):
-            fatal_errors.append(f'[{section}] section is missing from config')
-
-    # If any required section is missing, downstream checks would crash; bail
-    # now and surface the section-level errors.
     if fatal_errors:
         reporter.error(
             "ConfigError",
@@ -153,70 +255,113 @@ def validate_config(config: ConfigParser) -> bool:
         )
         return False
 
-    # Validate entries individually
-    if 'user' not in config['Auth'] or not config['Auth']['user'].strip():
-        fatal_errors.append('user is missing or empty')
+    # [auth]
+    auth = config['auth']
+    user = auth.get('user', '')
+    if not isinstance(user, str) or not user.strip():
+        fatal_errors.append('auth.user is missing or empty')
+    password = auth.get('password', '')
+    if not isinstance(password, str) or not password.strip():
+        fatal_errors.append('auth.password is missing or empty')
 
-    if 'password' not in config['Auth'] or not config['Auth']['password'].strip():
-        fatal_errors.append('password is missing or empty')
+    # [servers] and nested cameras
+    servers_table = config['servers']
+    if not servers_table:
+        fatal_errors.append('At least one server must be defined under [servers.<name>]')
 
-    for server_name, server_ip in config['Network'].items():
-        if not server_ip.strip():
-            fatal_errors.append(f'Server: {server_name} has no server_ip')
+    for srv_name, srv_data in servers_table.items():
+        if '.' in srv_name:
+            fatal_errors.append(f'Server name "{srv_name}" must not contain "."')
+        if not isinstance(srv_data, dict):
+            fatal_errors.append(f'[servers.{srv_name}] must be a table')
+            continue
 
-    if 'timezone' not in config['Settings'] or not config['Settings']['timezone'].strip():
-        fatal_errors.append('timezone is missing or empty')
+        url = srv_data.get('url', '')
+        if not isinstance(url, str) or not url.strip():
+            fatal_errors.append(f'[servers.{srv_name}].url is missing or empty')
 
-    if 'timelapse_multiplier' not in config['Settings'] or not config['Settings']['timelapse_multiplier'].strip():
-        warnings.append('timelapse_multiplier is missing or empty. Program will default to 10')
-    else:
-        try:
-            if int(config['Settings']['timelapse_multiplier']) <= 0:
-                fatal_errors.append('timelapse_multiplier must be a positive integer')
-        except ValueError:
-            fatal_errors.append('timelapse_multiplier must be a positive integer')
+        cameras_table = srv_data.get('cameras', {})
+        if not isinstance(cameras_table, dict):
+            fatal_errors.append(f'[servers.{srv_name}.cameras] must be a table')
+            continue
+        if not cameras_table:
+            warnings.append(f'Server "{srv_name}" has no cameras defined')
+            continue
 
-    if 'compression_level' not in config['Settings'] or not config['Settings']['compression_level'].strip():
-        warnings.append('compression_level is missing or empty. Program will default to medium')
+        for alias, cam_data in cameras_table.items():
+            if '.' in str(alias):
+                fatal_errors.append(f'Camera alias "{alias}" must not contain "."')
+            if not isinstance(cam_data, dict):
+                fatal_errors.append(f'[servers.{srv_name}.cameras.{alias}] must be a table')
+                continue
 
-    crop_dimensions = config['Settings'].get('crop_dimensions', '').strip()
-    if crop_dimensions:
-        try:
-            crop_dimensions = literal_eval(crop_dimensions)
-            # Check if all values are integers
-            if not all(isinstance(coord, int) for point in crop_dimensions for coord in point):
-                warnings.append('crop_dimensions should contain integers only')
-        except ValueError:
-            warnings.append('crop_dimensions should follow the format: ((x, y), (width, height))')
+            cam_id = cam_data.get('id')
+            if cam_id is None:
+                fatal_errors.append(f'[servers.{srv_name}.cameras.{alias}].id is required')
+            elif not isinstance(cam_id, int) or isinstance(cam_id, bool) or cam_id <= 0:
+                fatal_errors.append(
+                    f'[servers.{srv_name}.cameras.{alias}].id must be a positive integer'
+                )
 
-    if 'font_weight' not in config['Settings'] or not config['Settings']['font_weight'].strip():
-        warnings.append('font_weight is missing or empty. Program will default to 2')
-    else:
-        try:
-            if int(config['Settings']['font_weight']) <= 0:
-                fatal_errors.append('font_weight must be a positive integer')
-        except ValueError:
-            fatal_errors.append('font_weight must be a positive integer')
+            cam_crop = cam_data.get('crop_dimensions')
+            if cam_crop is not None and not _is_valid_crop(cam_crop):
+                fatal_errors.append(
+                    f'[servers.{srv_name}.cameras.{alias}].crop_dimensions must be '
+                    '[[x, y], [w, h]] with integer values'
+                )
 
-    if 'caption' not in config['Settings']:
-        warnings.append('caption is missing from Settings header.')
-    # Caption length is enforced after merging args + config (see main()), so
-    # CLI overrides and config-only values are both bounded by the same rule.
+    # [settings]
+    settings_table = config['settings']
 
-    # Only validate Runtime section if it exists
-    if config.has_section('Runtime') and 'server' in config['Runtime']:
-        server = config['Runtime']['server']
-        if server not in config['Network']:
-            fatal_errors.append(f'Server {server} not found in the Network list')
+    timezone = settings_table.get('timezone')
+    if not isinstance(timezone, str) or not timezone.strip():
+        fatal_errors.append('settings.timezone is missing or empty')
 
-    for camera_number, camera_value in config['Cameras'].items():
-        if not camera_value.strip():
-            fatal_errors.append(f'Camera {camera_number} has no id')
+    multiplier = settings_table.get('timelapse_multiplier')
+    if multiplier is None:
+        warnings.append('settings.timelapse_multiplier is missing. Program will default to 10')
+    elif not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier <= 0:
+        fatal_errors.append('settings.timelapse_multiplier must be a positive integer')
+
+    compression_level = settings_table.get('compression_level')
+    if compression_level is None or (isinstance(compression_level, str) and not compression_level.strip()):
+        warnings.append('settings.compression_level is missing. Program will default to medium')
+    elif compression_level not in ('low', 'medium', 'high'):
+        fatal_errors.append("settings.compression_level must be one of: 'low', 'medium', 'high'")
+
+    font_weight = settings_table.get('font_weight')
+    if font_weight is None:
+        warnings.append('settings.font_weight is missing. Program will default to 2')
+    elif not isinstance(font_weight, int) or isinstance(font_weight, bool) or font_weight <= 0:
+        fatal_errors.append('settings.font_weight must be a positive integer')
+
+    default_crop = settings_table.get('default_crop_dimensions')
+    if default_crop is not None and not _is_valid_crop(default_crop):
+        fatal_errors.append(
+            'settings.default_crop_dimensions must be [[x, y], [w, h]] with integer values'
+        )
+
+    # [runtime] is optional, but when present, cross-check its server/camera
+    # references against the declared servers/cameras above.
+    runtime = config.get('runtime', {})
+    if isinstance(runtime, dict):
+        runtime_server = runtime.get('server')
+        if runtime_server is not None and runtime_server not in servers_table:
+            fatal_errors.append(
+                f'runtime.server "{runtime_server}" is not defined under [servers]'
+            )
         else:
-            try:
-                int(camera_value)
-            except ValueError:
-                fatal_errors.append(f'Camera ID {camera_number} must be an integer')
+            runtime_alias = runtime.get('camera_alias')
+            if runtime_server and runtime_alias is not None:
+                srv_cameras = (
+                    servers_table.get(runtime_server, {}).get('cameras', {})
+                    if isinstance(servers_table.get(runtime_server), dict) else {}
+                )
+                if str(runtime_alias) not in {str(k) for k in srv_cameras.keys()}:
+                    fatal_errors.append(
+                        f'runtime.camera_alias "{runtime_alias}" is not defined under '
+                        f'[servers.{runtime_server}.cameras]'
+                    )
 
     for warning in warnings:
         reporter.warning(warning)
@@ -298,11 +443,16 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         w = int(w / scale)
         h = int(h / scale)
 
-        coords = ((x,y),(w,h))
+        coords = ((x, y), (w, h))
+        # Render the same value in TOML array syntax so users can paste it
+        # straight into either [settings].default_crop_dimensions or a
+        # [servers.<server>.cameras.<alias>].crop_dimensions entry.
+        toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
         reporter.info(f"Crop coordinates selected: {coords}", crop_dimensions=coords)
         reporter.info(
-            f"For future use: copy this into config file under [Settings]: "
-            f"crop_dimensions = {coords}"
+            "For future use, copy one of these lines into your config file:\n"
+            f"  default_crop_dimensions = {toml_coords}   # under [settings]\n"
+            f"  crop_dimensions = {toml_coords}            # under [servers.<srv>.cameras.<alias>]"
         )
         return coords
 
@@ -565,13 +715,13 @@ def parse_arguments():
     extract_parser.add_argument('date', nargs='?', default=None, type=str, help='Date of the requested video. If the footage spans past midnight, provide the date on which the footage starts. (e.g. 3/11)')
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
     extract_parser.add_argument('end', nargs='?', default=None, type=str, help='Ending timestamp of video requested (e.g. 5pm)')
-    extract_parser.add_argument('config_file', type=str, help='Filepath of local config file')
-    extract_parser.add_argument('--server', type=str, help='Server location initials ("Clark Hill" = "ch")')
+    extract_parser.add_argument('config_file', type=str, help='Filepath of local TOML config file')
+    extract_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file)')
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
     extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
     extract_parser.add_argument('--multiplier', type=int, help='Desired timelapse multiplier (must be a positive integer)')
-    extract_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Set by config file or query user.')
-    extract_parser.add_argument('--caption', type=str, help='Add caption above timestamp (max of 40 chars)')
+    extract_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    extract_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     # Compress subcommand
     compress_parser = subparsers.add_parser('compress', help='Compress a video file')
@@ -584,8 +734,8 @@ def parse_arguments():
     timelapse_parser.add_argument('video_filename', type=str, help='Video file for timelapse')
     timelapse_parser.add_argument('multiplier', default=None, type=int, help='Desired timelapse multiplier (must be a positive integer)')
     timelapse_parser.add_argument('-o', '--output_name', default=None, type=str, help='Desired filepath')
-    timelapse_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Set by config file or query user.')
-    timelapse_parser.add_argument('--caption', type=str, help='Add caption above timestamp (max of 40 chars)')
+    timelapse_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     return arg_parser.parse_args()
 
@@ -662,8 +812,6 @@ def main():
 
     try:
         if args.command == 'extract':
-
-            cameras = settings.cameras
             timezone = ZoneInfo(settings.timezone)
 
             start, end = convert_input_to_datetime(settings.date, settings.start_time, settings.end_time)

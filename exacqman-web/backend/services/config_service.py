@@ -1,217 +1,185 @@
 """
 Configuration Service
 
-Handles reading and managing ExacqMan configuration files for the web application.
+Reads ExacqMan TOML configuration files for the web application.
+
+The CLI tool (``exacqman.py``) consumes the same config files, so this module
+mirrors its structure expectations: lowercase top-level tables (``[auth]``,
+``[servers]``, ``[settings]``, ``[runtime]``), and per-server camera tables
+under ``[servers.<server>.cameras.<alias>]``.
 """
 
-import configparser
 import logging
+import tomllib
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
+
 from api.models import CameraInfo, ConfigInfo
 
 logger = logging.getLogger(__name__)
 
+
 class ConfigService:
     """Service for managing ExacqMan configuration files."""
-    
+
     def __init__(self):
-        """Initialize the configuration service."""
         self.working_directory = Path(__file__).parent.parent.parent.parent  # ExacqMan root
         self.timelapse_options = [1, 2, 5, 10, 15, 20, 25, 30, 40, 50]
-    
+
+    # ---- internal helpers ---------------------------------------------------
+
+    def _resolve_path(self, config_file: str) -> Path:
+        config_path = Path(config_file)
+        if not config_path.is_absolute():
+            config_path = self.working_directory / config_file
+        return config_path
+
+    def _load(self, config_file: str) -> dict:
+        """Read and parse a TOML config file.
+
+        Raises:
+            FileNotFoundError: if the file does not exist
+            tomllib.TOMLDecodeError: if the file is not valid TOML
+        """
+        config_path = self._resolve_path(config_file)
+        if not config_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_file}")
+        with open(config_path, "rb") as fp:
+            return tomllib.load(fp)
+
+    # ---- public API ---------------------------------------------------------
+
     def get_available_cameras(self, config_file: str) -> List[CameraInfo]:
-        """
-        Get list of available cameras from configuration file.
-        
-        Args:
-            config_file: Path to the configuration file
-            
-        Returns:
-            List of CameraInfo objects
-            
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            configparser.Error: If config file is invalid
+        """Return every camera across every server in the config.
+
+        Each entry carries its owning server name so the UI can group/filter
+        by server. ``alias`` and ``id`` keep their original meaning.
         """
         try:
-            config_path = Path(config_file)
-            if not config_path.is_absolute():
-                config_path = self.working_directory / config_file
-            
-            if not config_path.exists():
-                raise FileNotFoundError(f"Configuration file not found: {config_file}")
-            
-            config = configparser.ConfigParser()
-            config.optionxform = str  # Preserve original case
-            config.read(config_path)
-            
-            if 'Cameras' not in config:
-                logger.warning(f"No [Cameras] section found in {config_file}")
+            config = self._load(config_file)
+            servers_table = config.get("servers", {})
+            if not isinstance(servers_table, dict) or not servers_table:
+                logger.warning("No [servers] table found in %s", config_file)
                 return []
-            
-            cameras = []
-            for alias, camera_id in config['Cameras'].items():
-                cameras.append(CameraInfo(
-                    alias=alias,
-                    id=camera_id,
-                    description=f"{alias} (ID: {camera_id})"
-                ))
-            
-            logger.info(f"Loaded {len(cameras)} cameras from {config_file}")
+
+            cameras: List[CameraInfo] = []
+            for srv_name, srv_data in servers_table.items():
+                if not isinstance(srv_data, dict):
+                    continue
+                cams = srv_data.get("cameras", {})
+                if not isinstance(cams, dict):
+                    continue
+                for alias, cam_data in cams.items():
+                    if not isinstance(cam_data, dict):
+                        continue
+                    cam_id = cam_data.get("id")
+                    if cam_id is None:
+                        continue
+                    alias_str = str(alias)
+                    cameras.append(CameraInfo(
+                        alias=alias_str,
+                        id=str(cam_id),
+                        server=srv_name,
+                        description=f"{alias_str} on {srv_name} (ID: {cam_id})",
+                    ))
+
+            logger.info("Loaded %d cameras from %s", len(cameras), config_file)
             return cameras
-            
-        except Exception as e:
-            logger.error(f"Error reading cameras from config {config_file}: {str(e)}")
+
+        except Exception:
+            logger.exception("Error reading cameras from config %s", config_file)
             raise
-    
+
     def get_available_servers(self, config_file: str) -> Dict[str, str]:
-        """
-        Get list of available servers from configuration file.
-        
-        Args:
-            config_file: Path to the configuration file
-            
-        Returns:
-            Dictionary of server names to IP addresses
-            
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            configparser.Error: If config file is invalid
-        """
+        """Return a flat ``{server_name: url}`` map."""
         try:
-            config_path = Path(config_file)
-            if not config_path.is_absolute():
-                config_path = self.working_directory / config_file
-            
-            if not config_path.exists():
-                raise FileNotFoundError(f"Configuration file not found: {config_file}")
-            
-            config = configparser.ConfigParser()
-            config.optionxform = str  # Preserve original case
-            config.read(config_path)
-            
-            if 'Network' not in config:
-                logger.warning(f"No [Network] section found in {config_file}")
+            config = self._load(config_file)
+            servers_table = config.get("servers", {})
+            if not isinstance(servers_table, dict) or not servers_table:
+                logger.warning("No [servers] table found in %s", config_file)
                 return {}
-            
-            servers = dict(config['Network'])
-            logger.info(f"Loaded {len(servers)} servers from {config_file}")
+
+            servers: Dict[str, str] = {}
+            for srv_name, srv_data in servers_table.items():
+                if not isinstance(srv_data, dict):
+                    continue
+                url = srv_data.get("url")
+                if isinstance(url, str) and url.strip():
+                    servers[srv_name] = url
+
+            logger.info("Loaded %d servers from %s", len(servers), config_file)
             return servers
-            
-        except Exception as e:
-            logger.error(f"Error reading servers from config {config_file}: {str(e)}")
+
+        except Exception:
+            logger.exception("Error reading servers from config %s", config_file)
             raise
-    
+
     def get_config_info(self, config_file: str) -> ConfigInfo:
-        """
-        Get complete configuration information.
-        
-        Args:
-            config_file: Path to the configuration file
-            
-        Returns:
-            ConfigInfo object with all configuration data
-        """
+        """Return cameras + servers + timelapse options in one shot."""
         try:
             cameras = self.get_available_cameras(config_file)
             servers = self.get_available_servers(config_file)
-            
             return ConfigInfo(
                 cameras=cameras,
                 servers=servers,
-                timelapse_options=self.timelapse_options
+                timelapse_options=self.timelapse_options,
             )
-            
-        except Exception as e:
-            logger.error(f"Error getting config info from {config_file}: {str(e)}")
+        except Exception:
+            logger.exception("Error getting config info from %s", config_file)
             raise
-    
+
     def validate_camera(self, config_file: str, camera_alias: str) -> bool:
-        """
-        Validate that a camera alias exists in the configuration.
-        
-        Args:
-            config_file: Path to the configuration file
-            camera_alias: Camera alias to validate
-            
-        Returns:
-            True if camera exists, False otherwise
-        """
+        """Return True iff `camera_alias` exists under any server in the config."""
         try:
             cameras = self.get_available_cameras(config_file)
             return any(camera.alias == camera_alias for camera in cameras)
-        except Exception as e:
-            logger.error(f"Error validating camera {camera_alias}: {str(e)}")
+        except Exception:
+            logger.exception("Error validating camera %s", camera_alias)
             return False
-    
+
     def get_camera_id(self, config_file: str, camera_alias: str) -> Optional[str]:
-        """
-        Get the camera ID for a given alias.
-        
-        Args:
-            config_file: Path to the configuration file
-            camera_alias: Camera alias to look up
-            
-        Returns:
-            Camera ID if found, None otherwise
+        """Return the camera ID for `camera_alias`.
+
+        With per-server camera tables it's possible for the same alias to
+        exist under multiple servers; this lookup returns the first match
+        encountered. Callers that need to disambiguate should use
+        ``get_available_cameras`` and filter by ``server``.
         """
         try:
-            cameras = self.get_available_cameras(config_file)
-            for camera in cameras:
+            for camera in self.get_available_cameras(config_file):
                 if camera.alias == camera_alias:
                     return camera.id
             return None
-        except Exception as e:
-            logger.error(f"Error getting camera ID for {camera_alias}: {str(e)}")
+        except Exception:
+            logger.exception("Error getting camera ID for %s", camera_alias)
             return None
-    
+
     def get_available_config_files(self) -> List[str]:
-        """
-        Get list of available configuration files in the ExacqMan directory.
-        
-        Returns:
-            List of configuration file paths
-        """
+        """List ``*.config`` files in the ExacqMan working directory."""
         try:
-            config_files = []
-            for file_path in self.working_directory.glob("*.config"):
-                config_files.append(file_path.name)
-            
-            logger.info(f"Found {len(config_files)} configuration files")
+            config_files = [p.name for p in self.working_directory.glob("*.config")]
+            logger.info("Found %d configuration files", len(config_files))
             return config_files
-            
-        except Exception as e:
-            logger.error(f"Error finding config files: {str(e)}")
+        except Exception:
+            logger.exception("Error finding config files")
             return []
-    
+
     def validate_config_file(self, config_file: str) -> bool:
-        """
-        Validate that a configuration file exists and is readable.
-        
-        Args:
-            config_file: Path to the configuration file
-            
-        Returns:
-            True if valid, False otherwise
+        """Lightweight structural check: file exists, parses as TOML, has the
+        required top-level tables. Deeper semantic validation lives in the
+        CLI (``exacqman.validate_config``) and runs when an extract job
+        actually executes.
         """
         try:
-            config_path = Path(config_file)
-            if not config_path.is_absolute():
-                config_path = self.working_directory / config_file
-            
-            if not config_path.exists():
-                return False
-            
-            # Try to parse the config file
-            config = configparser.ConfigParser()
-            config.optionxform = str  # Preserve original case
-            config.read(config_path)
-            
-            # Check for required sections
-            required_sections = ['Auth', 'Network', 'Cameras', 'Settings']
-            return all(section in config for section in required_sections)
-            
-        except Exception as e:
-            logger.error(f"Error validating config file {config_file}: {str(e)}")
+            config = self._load(config_file)
+        except FileNotFoundError:
             return False
+        except tomllib.TOMLDecodeError as e:
+            logger.error("Invalid TOML in %s: %s", config_file, e)
+            return False
+        except Exception:
+            logger.exception("Error validating config file %s", config_file)
+            return False
+
+        required_tables = ["auth", "servers", "settings"]
+        return all(isinstance(config.get(t), dict) for t in required_tables)

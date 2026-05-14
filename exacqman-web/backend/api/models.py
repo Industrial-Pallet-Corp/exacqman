@@ -75,6 +75,7 @@ class CameraInfo(BaseModel):
     """Model for camera information."""
     alias: str = Field(..., description="Camera alias")
     id: str = Field(..., description="Camera ID")
+    server: Optional[str] = Field(None, description="Name of the server this camera lives under")
     description: Optional[str] = Field(None, description="Camera description")
 
 class ConfigInfo(BaseModel):
