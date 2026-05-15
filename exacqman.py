@@ -143,7 +143,11 @@ class Settings:
                 config_value=settings_table.get('timezone'),
                 cls_value=cls.timezone,
             ),
-            crop=bool(set_value(arg_value='crop', cls_value=cls.crop)),
+            crop=bool(set_value(
+                arg_value='crop',
+                config_value=runtime.get('crop'),
+                cls_value=cls.crop,
+            )),
             default_crop_dimensions=default_crop,
             crop_dimensions=effective_crop,
             font_weight=set_value(
@@ -362,6 +366,11 @@ def validate_config(config: dict) -> bool:
                         f'runtime.camera_alias "{runtime_alias}" is not defined under '
                         f'[servers.{runtime_server}.cameras]'
                     )
+
+        if 'crop' in runtime and not isinstance(runtime['crop'], bool):
+            fatal_errors.append(
+                f'runtime.crop must be a boolean (got {type(runtime["crop"]).__name__})'
+            )
 
     for warning in warnings:
         reporter.warning(warning)
@@ -720,7 +729,7 @@ def parse_arguments():
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
     extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
     extract_parser.add_argument('--multiplier', type=int, help='Desired timelapse multiplier (must be a positive integer)')
-    extract_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    extract_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     extract_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     # Compress subcommand
@@ -734,7 +743,7 @@ def parse_arguments():
     timelapse_parser.add_argument('video_filename', type=str, help='Video file for timelapse')
     timelapse_parser.add_argument('multiplier', default=None, type=int, help='Desired timelapse multiplier (must be a positive integer)')
     timelapse_parser.add_argument('-o', '--output_name', default=None, type=str, help='Desired filepath')
-    timelapse_parser.add_argument('-c', '--crop', action='store_true', help='Crop the video. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    timelapse_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     return arg_parser.parse_args()
