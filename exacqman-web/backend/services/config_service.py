@@ -4,9 +4,10 @@ Configuration Service
 Reads ExacqMan TOML configuration files for the web application.
 
 The CLI tool (``exacqman.py``) consumes the same config files, so this module
-mirrors its structure expectations: lowercase top-level tables (``[auth]``,
-``[servers]``, ``[settings]``, ``[runtime]``), and per-server camera tables
-under ``[servers.<server>.cameras.<alias>]``.
+mirrors its structure expectations: lowercase top-level tables (``[servers]``,
+``[settings]``, ``[runtime]``), and per-server camera tables under
+``[servers.<server>.cameras.<alias>]``. Authentication is loaded from a
+separate credentials file by the CLI (see ``sample.credentials``).
 """
 
 import logging
@@ -181,5 +182,5 @@ class ConfigService:
             logger.exception("Error validating config file %s", config_file)
             return False
 
-        required_tables = ["auth", "servers", "settings"]
+        required_tables = ["servers", "settings"]
         return all(isinstance(config.get(t), dict) for t in required_tables)

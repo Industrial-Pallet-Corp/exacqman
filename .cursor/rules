@@ -87,7 +87,7 @@ ExacqMan is a Python video processing tool for extracting, timelapsing, and comp
 ## Security & Performance
 
 ### Security
-- Store credentials in configuration files, not in code
+- Store credentials in dedicated credentials files (copy from sample.credentials to default.credentials), not in *.config files or code
 - Use environment variables for sensitive data
 - Never commit credentials to version control
 - Validate file paths to prevent directory traversal

@@ -207,3 +207,9 @@ notes
 # Configuration files (except default.config)
 *.config
 !default.config
+
+# Credentials (local files; sample.credentials is the committed template)
+credentials
+default.credentials
+*.credentials
+!sample.credentials

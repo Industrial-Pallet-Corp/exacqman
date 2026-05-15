@@ -9,6 +9,7 @@ from progress import init_reporter, get_reporter
 import argparse
 import cv2
 import tomllib
+from pathlib import Path
 
 
 @dataclass
@@ -18,7 +19,7 @@ class Settings:
     Default settings can be set in this class. 
     ArgParse and configParser overwrite the settings in this class (argParse > configParser > defaults)
     '''
-    user: str = None
+    username: str = None
     password: str = None
 
     servers: dict = None                # {server_name: url} for all configured servers
@@ -45,7 +46,12 @@ class Settings:
     end_time: str = None                # End time of video (e.g. '6 pm', '6:30pm', '18:30')
 
     @classmethod
-    def from_args_and_config(cls, args: argparse.Namespace, config: dict = None) -> 'Settings':
+    def from_args_and_config(
+        cls,
+        args: argparse.Namespace,
+        config: dict = None,
+        auth: dict = None,
+    ) -> 'Settings':
         """Merge CLI args, parsed TOML config, and class defaults in that priority.
 
         `config` is the dict returned by ``tomllib.load``. Missing keys at any
@@ -67,7 +73,7 @@ class Settings:
                 raise ValueError(f"Required parameter {arg_value or 'config'} is missing")
             return None
 
-        auth = config.get('auth', {})
+        auth = auth or {}
         servers_table = config.get('servers', {})
         settings_table = config.get('settings', {})
         runtime = config.get('runtime', {})
@@ -124,7 +130,7 @@ class Settings:
         effective_crop = (cam_entry or {}).get('crop_dimensions') or default_crop
 
         return cls(
-            user=auth.get('user', ''),
+            username=auth.get('username', ''),
             password=auth.get('password', ''),
             servers=servers_by_name,
             cameras=cameras_by_server,
@@ -212,6 +218,99 @@ def import_config(config_file: str) -> dict:
     return config
 
 
+def resolve_credentials_path(
+    config_file: str,
+    config: dict,
+    cli_path: str | None = None,
+) -> Path:
+    """Pick which credentials file to load for this run.
+
+    Priority: CLI ``--credentials`` > ``[settings].credentials_file``. There is
+    no implicit fallback -- the caller must supply one source or the other so
+    the credentials path is always explicit in the config or on the command
+    line. Relative paths in ``credentials_file`` resolve from the config
+    file's directory; relative ``--credentials`` paths resolve from CWD.
+
+    Emits a ``CredentialsError`` event and exits non-zero if neither source
+    is set.
+    """
+    if cli_path:
+        path = Path(cli_path)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path.resolve()
+
+    settings_table = config.get('settings', {}) if config else {}
+    configured = (
+        settings_table.get('credentials_file')
+        if isinstance(settings_table, dict) else None
+    )
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = Path(config_file).resolve().parent / path
+        return path.resolve()
+
+    get_reporter().error(
+        "CredentialsError",
+        (
+            "No credentials file specified. Set credentials_file in [settings] "
+            "of the config file, or pass --credentials on the command line."
+        ),
+    )
+    exit(1)
+
+
+def import_credentials(credentials_file: str | Path) -> dict:
+    """Load and validate a TOML credentials file; return the ``[auth]`` table."""
+    credentials_path = Path(credentials_file)
+    try:
+        with open(credentials_path, 'rb') as fp:
+            credentials = tomllib.load(fp)
+    except (FileNotFoundError, IsADirectoryError) as e:
+        get_reporter().error(
+            "CredentialsError",
+            f"Credentials file not found: {credentials_path} ({e})",
+        )
+        exit(1)
+    except tomllib.TOMLDecodeError as e:
+        get_reporter().error(
+            "CredentialsError",
+            f"Credentials file is not valid TOML: {credentials_path}: {e}",
+        )
+        exit(1)
+
+    if not validate_credentials(credentials):
+        exit(1)
+
+    return credentials['auth']
+
+
+def validate_credentials(credentials: dict) -> bool:
+    """Validate a parsed credentials dict (expects ``[auth]`` with username/password)."""
+    reporter = get_reporter()
+    fatal_errors: list[str] = []
+
+    auth = credentials.get('auth')
+    if not isinstance(auth, dict):
+        fatal_errors.append('[auth] table is missing from credentials file')
+    else:
+        username = auth.get('username', '')
+        if not isinstance(username, str) or not username.strip():
+            fatal_errors.append('auth.username is missing or empty')
+        password = auth.get('password', '')
+        if not isinstance(password, str) or not password.strip():
+            fatal_errors.append('auth.password is missing or empty')
+
+    if fatal_errors:
+        reporter.error(
+            "CredentialsError",
+            "Credentials validation failed:\n" + "\n".join(fatal_errors),
+        )
+        return False
+    return True
+
+
 def _is_valid_crop(crop) -> bool:
     """Return True iff `crop` is shaped like ``[[x, y], [w, h]]`` with ints."""
     if not isinstance(crop, list) or len(crop) != 2:
@@ -247,7 +346,7 @@ def validate_config(config: dict) -> bool:
 
     # Top-level tables must exist before any sub-checks; otherwise downstream
     # code raises confusing AttributeError/KeyError.
-    required_tables = ['auth', 'servers', 'settings']
+    required_tables = ['servers', 'settings']
     for name in required_tables:
         if not isinstance(config.get(name), dict):
             fatal_errors.append(f'[{name}] table is missing from config')
@@ -258,15 +357,6 @@ def validate_config(config: dict) -> bool:
             "Config validation failed:\n" + "\n".join(fatal_errors),
         )
         return False
-
-    # [auth]
-    auth = config['auth']
-    user = auth.get('user', '')
-    if not isinstance(user, str) or not user.strip():
-        fatal_errors.append('auth.user is missing or empty')
-    password = auth.get('password', '')
-    if not isinstance(password, str) or not password.strip():
-        fatal_errors.append('auth.password is missing or empty')
 
     # [servers] and nested cameras
     servers_table = config['servers']
@@ -371,6 +461,12 @@ def validate_config(config: dict) -> bool:
             fatal_errors.append(
                 f'runtime.crop must be a boolean (got {type(runtime["crop"]).__name__})'
             )
+
+    credentials_file = settings_table.get('credentials_file')
+    if credentials_file is not None and (
+        not isinstance(credentials_file, str) or not credentials_file.strip()
+    ):
+        fatal_errors.append('settings.credentials_file must be a non-empty string')
 
     for warning in warnings:
         reporter.warning(warning)
@@ -725,6 +821,15 @@ def parse_arguments():
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
     extract_parser.add_argument('end', nargs='?', default=None, type=str, help='Ending timestamp of video requested (e.g. 5pm)')
     extract_parser.add_argument('config_file', type=str, help='Filepath of local TOML config file')
+    extract_parser.add_argument(
+        '--credentials',
+        type=str,
+        default=None,
+        help=(
+            'Path to TOML credentials file. Overrides settings.credentials_file '
+            'in the config. One of the two must be set.'
+        ),
+    )
     extract_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file)')
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
     extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
@@ -802,10 +907,21 @@ def main():
 
     # If config file is specified in args, then read the config.
     config_file = getattr(args, 'config_file', None)
+    auth = None
     if config_file:
         config = import_config(config_file)
+        credentials_path = resolve_credentials_path(
+            config_file,
+            config,
+            getattr(args, 'credentials', None),
+        )
+        auth = import_credentials(credentials_path)
 
-    settings = Settings.from_args_and_config(args, config) if config else Settings.from_args_and_config(args)
+    settings = (
+        Settings.from_args_and_config(args, config, auth)
+        if config
+        else Settings.from_args_and_config(args)
+    )
 
     # Enforce caption length on the effective post-merge value so the rule
     # applies uniformly regardless of source (CLI --caption or [Settings] caption).
@@ -826,11 +942,11 @@ def main():
             start, end = convert_input_to_datetime(settings.date, settings.start_time, settings.end_time)
 
             # Instantiate api class and retrieve video
-            exapi = Exacqvision(settings.server_ip, settings.user, settings.password, timezone)
+            exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
 
             try:
                 extracted_video_name = exapi.get_video(settings.camera_id, start, end, video_filename=settings.output_filename)
-                exapi = Exacqvision(settings.server_ip, settings.user, settings.password, timezone)  # Reinstantiated object because of auth token timeout.
+                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)  # Reinstantiated object because of auth token timeout.
                 video_timestamps = exapi.get_timestamps(settings.camera_id, start, end)
             except ExacqvisionError as e:
                 reporter.error(
