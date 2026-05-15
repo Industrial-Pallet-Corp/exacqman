@@ -88,6 +88,9 @@ class ExacqManService:
             if request.server:
                 cmd_args.extend(["--server", request.server])
 
+            if request.caption:
+                cmd_args.extend(["--caption", request.caption])
+
             logger.info(f"Running extract command: {' '.join(cmd_args)}")
             logger.info(f"Working directory: {self.working_directory}")
             logger.info(f"Config file: {request.config_file}")

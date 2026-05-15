@@ -11,6 +11,7 @@ import ValidationUtils from './utils/validation.js';
 import CameraSelector from './components/camera-selector.js';
 import DateTimePicker from './components/datetime-picker.js';
 import MultiplierSelector from './components/multiplier-selector.js';
+import CaptionInput from './components/caption-input.js';
 import JobStatus from './components/job-status.js';
 import FileBrowser from './components/file-browser.js';
 
@@ -25,6 +26,7 @@ class ExacqManApp {
         this.cameraSelector = null;
         this.dateTimePicker = null;
         this.multiplierSelector = null;
+        this.captionInput = null;
         this.jobStatus = null;
         this.fileBrowser = null;
         
@@ -80,6 +82,7 @@ class ExacqManApp {
         this.cameraSelector = new CameraSelector(this.api, this.state);
         this.dateTimePicker = new DateTimePicker(this.state);
         this.multiplierSelector = new MultiplierSelector(this.state);
+        this.captionInput = new CaptionInput(this.state);
         this.jobStatus = new JobStatus(this.api, this.state);
         this.fileBrowser = new FileBrowser(this.api, this.state);
     }
@@ -376,17 +379,23 @@ class ExacqManApp {
         const datetimeValid = this.dateTimePicker?.validateBoth();
         const multiplierValid = this.multiplierSelector?.validateSelection();
         const serverValid = this.validateServerSelection();
-        
+        const captionValid = this.captionInput?.isValid() ?? true;
+
+        if (!captionValid) {
+            this.showError('Caption is too long. Maximum 25 characters.');
+        }
+
         console.log('Form validation:', {
             configValid,
             cameraValid,
             datetimeValid,
             multiplierValid,
             serverValid,
+            captionValid,
             cameraSelectValue: this.cameraSelector?.getSelectedCamera()?.alias
         });
-        
-        return configValid && cameraValid && datetimeValid && multiplierValid && serverValid;
+
+        return configValid && cameraValid && datetimeValid && multiplierValid && serverValid && captionValid;
     }
 
     /**
@@ -453,6 +462,7 @@ class ExacqManApp {
         const datetimeValues = this.dateTimePicker?.getValues();
         const multiplier = this.multiplierSelector?.getValue();
         const server = document.getElementById('server-select')?.value;
+        const caption = this.captionInput?.getValue() ?? null;
 
         console.log('Form data components:', {
             configFile,
@@ -460,7 +470,8 @@ class ExacqManApp {
             selectedCameraAlias,
             datetimeValues,
             multiplier,
-            server
+            server,
+            caption
         });
 
         return {
@@ -469,7 +480,8 @@ class ExacqManApp {
             end_datetime: datetimeValues?.end_datetime,
             timelapse_multiplier: multiplier,
             config_file: configFile,
-            server: server  // Server is now required, so no fallback to null
+            server: server,  // Server is now required, so no fallback to null
+            caption: caption
         };
     }
 
@@ -646,9 +658,12 @@ class ExacqManApp {
         
         // Then set default values and restore preferences
         this.dateTimePicker?.setDefaultValues();
-        
+
         // Reset multiplier to saved preference (this will load from localStorage)
         this.multiplierSelector?.reset();
+
+        // Restore caption from saved preference (form.reset() wipes the input)
+        this.captionInput?.reset();
     }
 
 

@@ -30,12 +30,25 @@ class ExtractRequest(BaseModel):
     timelapse_multiplier: int = Field(10, description="Timelapse multiplier (1-50)")
     config_file: str = Field(..., description="Path to config file")
     server: Optional[str] = Field(None, description="Server location initials")
-    
+    caption: Optional[str] = Field(
+        None,
+        max_length=25,
+        description="Optional caption rendered below the timestamp (max 25 chars)",
+    )
+
     @validator('timelapse_multiplier')
     def validate_multiplier(cls, v):
         if not (1 <= v <= 50):
             raise ValueError('Timelapse multiplier must be between 1 and 50')
         return v
+
+    @validator('caption', pre=True)
+    def normalize_caption(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError('Caption must be a string')
+        return v if v.strip() else None
     
     @validator('start_datetime', pre=True)
     def parse_start_datetime(cls, v):

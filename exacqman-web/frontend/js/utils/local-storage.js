@@ -11,6 +11,7 @@ class LocalStorageService {
             server: null,
             camera: null,
             timelapseMultiplier: 50, // Default to 50x
+            caption: '',
             lastUpdated: null
         };
     }

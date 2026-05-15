@@ -68,6 +68,9 @@ class MultiplierSelector {
         this.state.subscribe('selectedCamera', () => {
             this.updateExtractionButton();
         });
+        this.state.subscribe('captionValid', () => {
+            this.updateExtractionButton();
+        });
     }
 
     /**
@@ -157,8 +160,14 @@ class MultiplierSelector {
         const configSelected = this.state.get('currentConfig');
         const cameraSelected = this.state.get('selectedCamera');
         const multiplierSelected = this.state.get('selectedMultiplier');
-        
-        return configSelected && cameraSelected && multiplierSelected;
+        const captionValid = this.state.get('captionValid');
+
+        return (
+            configSelected &&
+            cameraSelected &&
+            multiplierSelected &&
+            captionValid !== false
+        );
     }
 
     /**

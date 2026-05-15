@@ -78,6 +78,13 @@
                     </select>
                 </div>
                 <div class="form-group">
+                    <label for="caption-input">Caption:</label>
+                    <div class="caption-row">
+                        <input type="text" id="caption-input" class="form-control" placeholder="Overlay text under the timestamp" autocomplete="off">
+                        <span id="caption-counter" class="caption-counter" aria-live="polite">25 chars remaining</span>
+                    </div>
+                </div>
+                <div class="form-group">
                     <button type="submit" id="extract-button" class="btn btn-primary" disabled>
                         <span class="btn-text">Extract Footage</span>
                         <span class="btn-loading" style="display: none;">Processing...</span>

@@ -227,6 +227,29 @@ label {
     display: block;
 }
 
+/* Caption input with inline character counter */
+.caption-row {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-3);
+}
+
+.caption-row .form-control {
+    flex: 1;
+    min-width: 0;
+}
+
+.caption-counter {
+    color: var(--gray-400);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+    user-select: none;
+}
+
+.caption-counter.over-limit {
+    color: var(--error-color);
+}
+
 /* Required field indicator */
 .required {
     color: var(--error-color);
@@ -258,6 +281,14 @@ label {
 .btn-primary {
     background-color: var(--primary-color);
     color: white;
+}
+
+.btn-primary:disabled {
+    background-color: var(--gray-300);
+    color: var(--gray-500);
+    opacity: 1;
+    box-shadow: none;
+    transform: none;
 }
 
 .btn-primary:hover:not(:disabled) {
