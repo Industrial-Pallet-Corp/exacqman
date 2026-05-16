@@ -77,12 +77,11 @@ class DateTimePicker {
      */
     setDefaultValues() {
         const now = new Date();
-        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-        
-        
-        this.startInput.value = DateUtils.formatForInput(oneHourAgo);
+        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
+        this.startInput.value = DateUtils.formatForInput(fifteenMinutesAgo);
         this.endInput.value = DateUtils.formatForInput(now);
-        
+
         this.updateState();
     }
 

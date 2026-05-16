@@ -37,10 +37,10 @@ class AppState {
     initializeState() {
         // Set default datetime values (1 hour ago to now) in local time
         const now = new Date();
-        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-        
+        const fifteenMinutesAgo = new Date(now.getTime() - 15 * 60 * 1000);
+
         // Format for datetime-local input (YYYY-MM-DDTHH:MM)
-        this.state.defaultStartTime = this.formatDateTimeLocal(oneHourAgo);
+        this.state.defaultStartTime = this.formatDateTimeLocal(fifteenMinutesAgo);
         this.state.defaultEndTime = this.formatDateTimeLocal(now);
     }
 
