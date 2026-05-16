@@ -81,7 +81,6 @@ class ConfigService:
                         alias=alias_str,
                         id=str(cam_id),
                         server=srv_name,
-                        description=f"{alias_str} on {srv_name} (ID: {cam_id})",
                     ))
 
             logger.info("Loaded %d cameras from %s", len(cameras), config_file)

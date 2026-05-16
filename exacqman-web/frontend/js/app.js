@@ -275,7 +275,7 @@ class ExacqManApp {
             
             // Note: Config preference is loaded in populateConfigSelect()
             // Server and camera preferences are loaded when their respective
-            // components are populated (in populateServerSelect and updateCameraList)
+            // components are populated (in populateServerSelect and CameraSelector.renderCameras)
             // Multiplier preference is loaded in MultiplierSelector.setDefaultValue()
             
         } catch (error) {

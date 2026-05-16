@@ -55,10 +55,12 @@ class CameraSelector {
      * Set up state listeners
      */
     setupStateListeners() {
-        // Listen for camera updates
-        this.state.subscribe('cameras', (cameras) => {
-            this.updateCameraList(cameras);
-        });
+        // The dropdown is filtered by the selected server, so re-render any
+        // time the underlying camera list OR the selected server changes.
+        // The full camera list is the source of truth in state; this
+        // component derives a server-scoped view each time it renders.
+        this.state.subscribe('cameras', () => this.renderCameras());
+        this.state.subscribe('selectedServer', () => this.renderCameras());
 
         // Listen for loading state
         this.state.subscribe('isLoading', (isLoading) => {
@@ -107,57 +109,89 @@ class CameraSelector {
     }
 
     /**
-     * Update camera list in dropdown
+     * Render the camera dropdown filtered by the currently selected server.
+     *
+     * The full camera list (across all servers) lives in app state; this
+     * method derives the visible subset each render. Labels drop the
+     * "on <server>" suffix since every visible camera shares the same server.
+     *
+     * Selection priority after filtering:
+     *   1. Sticky: keep the current selection if its alias still exists in
+     *      the new filtered list. This makes "swap servers but keep the same
+     *      alias" (e.g. ``dock-6`` on both ``gpa`` and ``ch``) feel natural.
+     *   2. Saved preference: restore the last camera the user picked if it
+     *      matches a camera on this server.
+     *   3. Auto-select if there's only one camera on this server.
+     *   4. Otherwise leave unselected and clear ``selectedCamera`` in state.
      */
-    updateCameraList(cameras) {
+    renderCameras() {
         if (!this.selectElement) return;
 
-        // Preserve current selection
-        const currentValue = this.selectElement.value;
+        const allCameras = this.state.get('cameras') || [];
+        const selectedServer = this.state.get('selectedServer');
 
-        // Clear existing options
-        this.selectElement.innerHTML = '<option value="">Select camera...</option>';
-        
-        if (!cameras || cameras.length === 0) {
+        // No cameras loaded yet (e.g. before a config is chosen).
+        if (allCameras.length === 0) {
             this.selectElement.innerHTML = '<option value="">No cameras available</option>';
             this.selectElement.disabled = true;
+            this.selectElement.required = false;
+            this.state.set('selectedCamera', null);
             return;
         }
 
-        // Add camera options
-        cameras.forEach((camera, index) => {
+        // Cameras loaded but no server picked yet -- nudge the user.
+        if (!selectedServer) {
+            this.selectElement.innerHTML = '<option value="">Select a server first...</option>';
+            this.selectElement.disabled = true;
+            this.selectElement.required = false;
+            this.state.set('selectedCamera', null);
+            return;
+        }
+
+        const cameras = allCameras.filter(c => c.server === selectedServer);
+
+        if (cameras.length === 0) {
+            this.selectElement.innerHTML = '<option value="">No cameras for this server</option>';
+            this.selectElement.disabled = true;
+            this.selectElement.required = false;
+            this.state.set('selectedCamera', null);
+            return;
+        }
+
+        const currentValue = this.selectElement.value;
+
+        this.selectElement.innerHTML = '<option value="">Select camera...</option>';
+        cameras.forEach(camera => {
             const option = document.createElement('option');
             option.value = camera.alias;
-            option.textContent = camera.description || camera.alias;
+            option.textContent = `${camera.alias} (ID: ${camera.id})`;
             option.dataset.cameraId = camera.id;
             this.selectElement.appendChild(option);
         });
 
         this.selectElement.disabled = false;
         this.selectElement.required = true;
-        
-        // Try to load saved preference first
+
         const savedCamera = window.LocalStorageService.loadPreference('camera', null);
-        const preferredCamera = savedCamera && cameras.some(camera => camera.alias === savedCamera) ? savedCamera : null;
-        
-        // Auto-select if only one camera
-        if (cameras.length === 1) {
-            this.selectElement.value = cameras[0].alias;
-            this.handleCameraChange(cameras[0].alias);
-            console.log('Auto-selected camera:', cameras[0].alias);
-        }
-        // Use saved preference if available and valid
-        else if (preferredCamera) {
+        const preferredCamera = savedCamera && cameras.some(c => c.alias === savedCamera)
+            ? savedCamera : null;
+
+        if (currentValue && cameras.some(c => c.alias === currentValue)) {
+            this.selectElement.value = currentValue;
+            this.handleCameraChange(currentValue);
+            console.log('Sticky camera selection across server switch:', currentValue);
+        } else if (preferredCamera) {
             this.selectElement.value = preferredCamera;
             this.handleCameraChange(preferredCamera);
             console.log('Restored saved camera preference:', preferredCamera);
+        } else if (cameras.length === 1) {
+            this.selectElement.value = cameras[0].alias;
+            this.handleCameraChange(cameras[0].alias);
+            console.log('Auto-selected camera:', cameras[0].alias);
+        } else {
+            this.state.set('selectedCamera', null);
         }
-        // Restore current selection if it was valid (fallback)
-        else if (currentValue && cameras.some(camera => camera.alias === currentValue)) {
-            this.selectElement.value = currentValue;
-            console.log('CameraSelector updateCameraList - restored value:', currentValue);
-        }
-        
+
         this.clearError();
     }
 
@@ -286,7 +320,6 @@ class CameraSelector {
         const result = {
             alias: selectedValue,
             id: selectedOption.dataset.cameraId,
-            description: selectedOption.textContent
         };
         console.log('CameraSelector getSelectedCamera - result:', result);
         return result;
