@@ -381,10 +381,12 @@ class ExacqManApp {
                 this.jobStatus.startPolling(response.data.job_id);
                 
                 this.showSuccess('Video extraction started successfully');
-                
-                // Reset form AFTER successful submission
-                this.resetExtractionForm();
-                
+
+                // The form is intentionally left as-is so the user's
+                // selections (datetime, multiplier, caption, filename)
+                // persist across back-to-back extractions. Defaults only
+                // apply on initial page load / full reload.
+
             } else {
                 throw new Error('Invalid response from server');
             }
@@ -731,31 +733,6 @@ class ExacqManApp {
     removeJob(jobId) {
         this.state.removeJob(jobId);
     }
-
-    /**
-     * Reset extraction form
-     */
-    resetExtractionForm() {
-        // Reset form first (this clears any validation errors)
-        const form = document.getElementById('extraction-form');
-        if (form) {
-            form.reset();
-        }
-        
-        // Then set default values and restore preferences
-        this.dateTimePicker?.setDefaultValues();
-
-        // Reset multiplier to saved preference (this will load from localStorage)
-        this.multiplierSelector?.reset();
-
-        // Restore caption from saved preference (form.reset() wipes the input)
-        this.captionInput?.reset();
-
-        // Filename has no storage key, so reset() just clears it back to
-        // empty so the next extraction auto-generates a fresh name.
-        this.filenameInput?.reset();
-    }
-
 
     /**
      * Show success message
