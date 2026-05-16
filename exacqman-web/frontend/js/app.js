@@ -157,10 +157,15 @@ class ExacqManApp {
         // Processed videos - handled by FileBrowser component
 
         // Filename placeholder mirrors the backend's auto-generated stem,
-        // rebuilt whenever any of its inputs change.
+        // rebuilt whenever any of its inputs change. All four inputs are
+        // state-published (selectedServer is mirrored from server-select by
+        // populateServerSelect / handleServerChange / clearServerSelection)
+        // so whichever update settles last triggers the build with all
+        // pieces present -- no init-time nudges required.
         this.state.subscribe('selectedCamera', () => this.updateFilenamePlaceholder());
         this.state.subscribe('selectedMultiplier', () => this.updateFilenamePlaceholder());
         this.state.subscribe('startDateTime', () => this.updateFilenamePlaceholder());
+        this.state.subscribe('selectedServer', () => this.updateFilenamePlaceholder());
     }
 
     /**
@@ -179,7 +184,7 @@ class ExacqManApp {
         const camera = this.state.get('selectedCamera');
         const multiplier = this.state.get('selectedMultiplier');
         const startDateTime = this.state.get('startDateTime');
-        const server = document.getElementById('server-select')?.value;
+        const server = this.state.get('selectedServer');
 
         if (!camera || !multiplier || !startDateTime || !server) return;
 
@@ -283,11 +288,13 @@ class ExacqManApp {
      */
     handleServerChange(event) {
         const server = event.target.value;
+        // Publish to state for reactive consumers (filename placeholder,
+        // validators, form data). Empty selection -> null so subscribers can
+        // treat "no server" uniformly.
+        this.state.set('selectedServer', server || null);
         if (server) {
-            // Save preference to localStorage
             window.LocalStorageService.savePreference('server', server);
         }
-        this.updateFilenamePlaceholder();
     }
 
     /**
@@ -471,13 +478,15 @@ class ExacqManApp {
     validateServerSelection() {
         const serverSelect = document.getElementById('server-select');
         if (!serverSelect) return false;
-        
-        const selectedServer = serverSelect.value;
-        if (!selectedServer || selectedServer.trim() === '') {
+
+        // Value lives in state; the DOM element is only needed as the anchor
+        // for inline error styling via ValidationUtils.
+        const selectedServer = this.state.get('selectedServer');
+        if (!selectedServer || !selectedServer.trim()) {
             ValidationUtils.showFieldError(serverSelect, 'Please select a server');
             return false;
         }
-        
+
         ValidationUtils.clearFieldError(serverSelect);
         return true;
     }
@@ -528,7 +537,7 @@ class ExacqManApp {
         
         const datetimeValues = this.dateTimePicker?.getValues();
         const multiplier = this.multiplierSelector?.getValue();
-        const server = document.getElementById('server-select')?.value;
+        const server = this.state.get('selectedServer');
         const caption = this.captionInput?.getValue() ?? null;
         const filename = this.filenameInput?.getValue() ?? null;
 
@@ -660,6 +669,12 @@ class ExacqManApp {
             select.value = preferredServer;
             console.log('Restored saved server preference:', preferredServer);
         }
+
+        // Programmatic <select>.value assignments do not fire `change`, so
+        // publish to state explicitly. This is the moment downstream
+        // subscribers (e.g. the filename placeholder) get the final piece
+        // they need to render on initial page load.
+        this.state.set('selectedServer', select.value || null);
     }
 
     /**
@@ -672,6 +687,7 @@ class ExacqManApp {
         select.innerHTML = '<option value="">Waiting for configuration...</option>';
         select.disabled = true;
         select.required = false;
+        this.state.set('selectedServer', null);
     }
 
     /**
