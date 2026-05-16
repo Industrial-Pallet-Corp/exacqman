@@ -71,6 +71,9 @@ class MultiplierSelector {
         this.state.subscribe('captionValid', () => {
             this.updateExtractionButton();
         });
+        this.state.subscribe('filenameValid', () => {
+            this.updateExtractionButton();
+        });
     }
 
     /**
@@ -161,12 +164,14 @@ class MultiplierSelector {
         const cameraSelected = this.state.get('selectedCamera');
         const multiplierSelected = this.state.get('selectedMultiplier');
         const captionValid = this.state.get('captionValid');
+        const filenameValid = this.state.get('filenameValid');
 
         return (
             configSelected &&
             cameraSelected &&
             multiplierSelected &&
-            captionValid !== false
+            captionValid !== false &&
+            filenameValid !== false
         );
     }
 

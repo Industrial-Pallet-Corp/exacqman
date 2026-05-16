@@ -33,7 +33,7 @@ class Settings:
     crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Effective crop for this run: per-camera override if set, else default
     font_weight: int = 2                # Font thickness
     caption: str = None                 # Optional caption rendered below the timestamp
-    caption_limit = 25                  # Max number of characters for caption
+    caption_limit = 30                  # Max number of characters for caption
 
     server: str = None                  # Server name (must match a key under [servers])
     server_ip: str = None               # URL of the chosen Exacqvision server

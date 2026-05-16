@@ -192,12 +192,15 @@ class FileService:
     def _parse_filename_metadata(self, filename: str) -> tuple[Optional[str], Optional[int]]:
         """
         Parse camera alias and timelapse multiplier from filename.
-        
-        Expected format: YYYY-MM-DD_HHMMam/pm_camera_multiplierx.mp4
-        
+
+        Expected format: ``YYYY-MM-DD_HHMM_server_camera_multiplierx.mp4``
+        (HHMM is 24-hour). Parsing keys off the last two underscore-separated
+        parts, so it tolerates extra leading components such as the server
+        slot added by the new filename convention.
+
         Args:
             filename: Name of the file
-            
+
         Returns:
             Tuple of (camera_alias, timelapse_multiplier)
         """
@@ -209,8 +212,7 @@ class FileService:
             parts = name_without_ext.split('_')
             
             if len(parts) >= 4:
-                # Format: YYYY-MM-DD_HHMMam/pm_camera_multiplierx
-                # parts[0] = date, parts[1] = time, parts[2] = camera, parts[3] = multiplier
+                # parts[-1] = multiplier (e.g. "50x"); parts[-2] = camera alias
                 
                 # Last part should be the multiplier (e.g., "10x")
                 multiplier_part = parts[-1]

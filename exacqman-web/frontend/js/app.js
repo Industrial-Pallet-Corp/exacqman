@@ -11,7 +11,7 @@ import ValidationUtils from './utils/validation.js';
 import CameraSelector from './components/camera-selector.js';
 import DateTimePicker from './components/datetime-picker.js';
 import MultiplierSelector from './components/multiplier-selector.js';
-import CaptionInput from './components/caption-input.js';
+import BoundedTextInput from './components/bounded-text-input.js';
 import JobStatus from './components/job-status.js';
 import FileBrowser from './components/file-browser.js';
 
@@ -27,6 +27,7 @@ class ExacqManApp {
         this.dateTimePicker = null;
         this.multiplierSelector = null;
         this.captionInput = null;
+        this.filenameInput = null;
         this.jobStatus = null;
         this.fileBrowser = null;
         
@@ -82,7 +83,24 @@ class ExacqManApp {
         this.cameraSelector = new CameraSelector(this.api, this.state);
         this.dateTimePicker = new DateTimePicker(this.state);
         this.multiplierSelector = new MultiplierSelector(this.state);
-        this.captionInput = new CaptionInput(this.state);
+        this.captionInput = new BoundedTextInput(this.state, {
+            inputId: 'caption-input',
+            counterId: 'caption-counter',
+            maxLength: 30,
+            valueStateKey: 'selectedCaption',
+            validStateKey: 'captionValid',
+            storageKey: 'caption',
+        });
+        this.filenameInput = new BoundedTextInput(this.state, {
+            inputId: 'filename-input',
+            counterId: 'filename-counter',
+            maxLength: 30,
+            valueStateKey: 'selectedFilename',
+            validStateKey: 'filenameValid',
+            // Intentionally no storageKey: filename is per-run; clearing it
+            // after each extraction lets the backend auto-generate a fresh
+            // {date}_{time}_{server}_{camera}_{multiplier}x name.
+        });
         this.jobStatus = new JobStatus(this.api, this.state);
         this.fileBrowser = new FileBrowser(this.api, this.state);
     }
@@ -137,6 +155,49 @@ class ExacqManApp {
         });
 
         // Processed videos - handled by FileBrowser component
+
+        // Filename placeholder mirrors the backend's auto-generated stem,
+        // rebuilt whenever any of its inputs change.
+        this.state.subscribe('selectedCamera', () => this.updateFilenamePlaceholder());
+        this.state.subscribe('selectedMultiplier', () => this.updateFilenamePlaceholder());
+        this.state.subscribe('startDateTime', () => this.updateFilenamePlaceholder());
+    }
+
+    /**
+     * Rebuild the Filename input's placeholder from the current selections.
+     *
+     * Mirrors backend ``ExacqManService._generate_output_filename``:
+     * ``{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{N}x`` (HHMM is 24-hour).
+     * Leaves the existing placeholder in place until all four inputs are
+     * populated so the user sees a coherent example rather than a stem with
+     * ``?`` placeholders during initial page load.
+     */
+    updateFilenamePlaceholder() {
+        const filenameInput = document.getElementById('filename-input');
+        if (!filenameInput) return;
+
+        const camera = this.state.get('selectedCamera');
+        const multiplier = this.state.get('selectedMultiplier');
+        const startDateTime = this.state.get('startDateTime');
+        const server = document.getElementById('server-select')?.value;
+
+        if (!camera || !multiplier || !startDateTime || !server) return;
+
+        const date = new Date(startDateTime);
+        if (Number.isNaN(date.getTime())) return;
+
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+
+        const hh = String(date.getHours()).padStart(2, '0');
+        const min = String(date.getMinutes()).padStart(2, '0');
+        const timeStr = `${hh}${min}`;
+
+        const sanitize = (s) => String(s).toLowerCase().replace(/\s+/g, '-');
+
+        filenameInput.placeholder =
+            `${yyyy}-${mm}-${dd}_${timeStr}_${sanitize(server)}_${sanitize(camera)}_${multiplier}x`;
     }
 
     /**
@@ -226,6 +287,7 @@ class ExacqManApp {
             // Save preference to localStorage
             window.LocalStorageService.savePreference('server', server);
         }
+        this.updateFilenamePlaceholder();
     }
 
     /**
@@ -380,9 +442,12 @@ class ExacqManApp {
         const multiplierValid = this.multiplierSelector?.validateSelection();
         const serverValid = this.validateServerSelection();
         const captionValid = this.captionInput?.isValid() ?? true;
+        const filenameValid = this.filenameInput?.isValid() ?? true;
 
         if (!captionValid) {
-            this.showError('Caption is too long. Maximum 25 characters.');
+            this.showError('Caption is too long. Maximum 30 characters.');
+        } else if (!filenameValid) {
+            this.showError('Filename is too long. Maximum 30 characters.');
         }
 
         console.log('Form validation:', {
@@ -392,10 +457,12 @@ class ExacqManApp {
             multiplierValid,
             serverValid,
             captionValid,
+            filenameValid,
             cameraSelectValue: this.cameraSelector?.getSelectedCamera()?.alias
         });
 
-        return configValid && cameraValid && datetimeValid && multiplierValid && serverValid && captionValid;
+        return configValid && cameraValid && datetimeValid && multiplierValid &&
+            serverValid && captionValid && filenameValid;
     }
 
     /**
@@ -463,6 +530,7 @@ class ExacqManApp {
         const multiplier = this.multiplierSelector?.getValue();
         const server = document.getElementById('server-select')?.value;
         const caption = this.captionInput?.getValue() ?? null;
+        const filename = this.filenameInput?.getValue() ?? null;
 
         console.log('Form data components:', {
             configFile,
@@ -471,7 +539,8 @@ class ExacqManApp {
             datetimeValues,
             multiplier,
             server,
-            caption
+            caption,
+            filename
         });
 
         return {
@@ -481,7 +550,8 @@ class ExacqManApp {
             timelapse_multiplier: multiplier,
             config_file: configFile,
             server: server,  // Server is now required, so no fallback to null
-            caption: caption
+            caption: caption,
+            filename: filename
         };
     }
 
@@ -664,6 +734,10 @@ class ExacqManApp {
 
         // Restore caption from saved preference (form.reset() wipes the input)
         this.captionInput?.reset();
+
+        // Filename has no storage key, so reset() just clears it back to
+        // empty so the next extraction auto-generates a fresh name.
+        this.filenameInput?.reset();
     }
 
 

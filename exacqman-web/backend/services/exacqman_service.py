@@ -252,50 +252,45 @@ class ExacqManService:
 
     def _generate_output_filename(self, request: ExtractRequest) -> str:
         """
-        Generate a consistent output filename for the extract operation.
-        
-        Args:
-            request: ExtractRequest object
-            
+        Generate the output filename stem for the extract operation.
+
+        When ``request.filename`` is supplied, it is sanitized and used
+        verbatim. Otherwise the service generates a stem of the form
+        ``{date}_{time}_{server}_{camera}_{multiplier}x`` so filenames
+        remain unambiguous across servers (the same camera alias can exist
+        under multiple servers).
+
         Returns:
-            Generated filename (without .mp4 extension, as exacqman.py adds it automatically)
+            Filename stem without an extension; exacqman.py adds ``.mp4``.
         """
+        if request.filename:
+            return self._sanitize_filename_component(request.filename)
+
         date_str = request.start_datetime.strftime("%Y-%m-%d")
         time_str = self._format_time_for_filename(request.start_datetime)
-        # Sanitize camera alias: lowercase and replace spaces with hyphens
-        sanitized_camera = request.camera_alias.lower().replace(" ", "-")
-        return f"{date_str}_{time_str}_{sanitized_camera}_{request.timelapse_multiplier}x"
+        server = self._sanitize_filename_component(request.server) if request.server else "unknown"
+        camera = self._sanitize_filename_component(request.camera_alias)
+        return f"{date_str}_{time_str}_{server}_{camera}_{request.timelapse_multiplier}x"
+
+    @staticmethod
+    def _sanitize_filename_component(value: str) -> str:
+        """Lowercase and replace whitespace with hyphens for filesystem safety."""
+        return value.lower().replace(" ", "-")
     
     def _format_time_for_filename(self, datetime_obj) -> str:
         """
-        Format datetime for filename: 9:15am becomes 0915am, 11:45pm becomes 1145pm
-        
+        Format datetime as 24-hour HHMM for use in filename stems.
+
+        e.g. 9:15 am becomes ``0915``; 3:42 pm becomes ``1542``. 24-hour
+        avoids the am/pm suffix entirely and sorts lexically by clock time.
+
         Args:
             datetime_obj: datetime object
-            
+
         Returns:
             Formatted time string for filename
         """
-        # Get hour and minute
-        hour = datetime_obj.hour
-        minute = datetime_obj.minute
-        
-        # Convert to 12-hour format
-        if hour == 0:
-            hour_12 = 12
-            period = 'am'
-        elif hour < 12:
-            hour_12 = hour
-            period = 'am'
-        elif hour == 12:
-            hour_12 = 12
-            period = 'pm'
-        else:
-            hour_12 = hour - 12
-            period = 'pm'
-        
-        # Format as HHMMam/pm (zero-padded)
-        return f"{hour_12:02d}{minute:02d}{period}"
+        return f"{datetime_obj.hour:02d}{datetime_obj.minute:02d}"
     
     async def _cleanup_intermediate_files(self, base_filename: str = None):
         """

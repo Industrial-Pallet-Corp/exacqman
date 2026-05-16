@@ -32,8 +32,17 @@ class ExtractRequest(BaseModel):
     server: Optional[str] = Field(None, description="Server location initials")
     caption: Optional[str] = Field(
         None,
-        max_length=25,
-        description="Optional caption rendered below the timestamp (max 25 chars)",
+        max_length=30,
+        description="Optional caption rendered below the timestamp (max 30 chars)",
+    )
+    filename: Optional[str] = Field(
+        None,
+        max_length=30,
+        description=(
+            "Optional output filename stem (no extension). When omitted, the "
+            "service generates one of the form "
+            "{date}_{time}_{server}_{camera}_{multiplier}x."
+        ),
     )
 
     @validator('timelapse_multiplier')
@@ -49,6 +58,25 @@ class ExtractRequest(BaseModel):
         if not isinstance(v, str):
             raise ValueError('Caption must be a string')
         return v if v.strip() else None
+
+    @validator('filename', pre=True)
+    def normalize_filename(cls, v):
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError('Filename must be a string')
+        # Strip whitespace and any user-supplied extension; the service
+        # always writes .mp4. Reject paths so input cannot escape the
+        # exports directory.
+        stripped = v.strip()
+        if not stripped:
+            return None
+        if '/' in stripped or '\\' in stripped:
+            raise ValueError('Filename must not contain path separators')
+        # Drop a single trailing extension if present (e.g. ".mp4").
+        if '.' in stripped:
+            stripped = stripped.rsplit('.', 1)[0]
+        return stripped or None
     
     @validator('start_datetime', pre=True)
     def parse_start_datetime(cls, v):
