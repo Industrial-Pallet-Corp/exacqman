@@ -13,20 +13,33 @@ class AppState {
             cameras: [],
             servers: {},
             currentConfig: null,
-            
-            // Job management
-            activeJobs: new Map(),
-            jobHistory: [],
-            
+
+            // Job queue (server-authoritative, refreshed by the queue poller)
+            //
+            //   queue.running:  the single Job currently being processed (or null)
+            //   queue.waiting:  FIFO list of queued Jobs (max 3)
+            //   queueFull:      derived flag, true when running != null && waiting.length >= 3
+            //   sessionJobs:    Map<jobId, Job> of every job this client has
+            //                   observed since page load. Persists local copies
+            //                   of jobs that have aged out of the server snapshot
+            //                   (so terminal results stay visible until refresh).
+            //   lastPollTime:   server_time from the latest snapshot; sent as
+            //                   ?since= on the next poll to scope terminal jobs
+            //                   to transitions that occurred since then.
+            queue: { running: null, waiting: [] },
+            queueFull: false,
+            sessionJobs: new Map(),
+            lastPollTime: null,
+
             // File management
             processedVideos: [],
             lastFileRefresh: null,
-            
+
             // UI state
             isLoading: false,
             currentError: null
         };
-        
+
         this.listeners = new Map();
         this.initializeState();
     }
@@ -192,83 +205,81 @@ class AppState {
         this.set('currentConfig', configFile);
     }
 
-    // Job management
+    // Job queue management
 
     /**
-     * Add new job
-     * @param {string} jobId - Job identifier
-     * @param {Object} jobData - Job data
+     * Integrate the latest server snapshot into local state.
+     *
+     * Called by the queue poller on each successful tick. The snapshot is
+     * server-authoritative for running + waiting; terminal entries are
+     * merged into sessionJobs so they stick around until page refresh
+     * even after the server's TTL expires.
+     *
+     * @param {{running: Object|null, waiting: Object[], terminal: Object[], server_time: string}} snapshot
      */
-    addJob(jobId, jobData) {
-        const jobs = new Map(this.state.activeJobs);
-        jobs.set(jobId, {
-            ...jobData,
-            id: jobId,
-            createdAt: new Date().toISOString()
+    updateFromSnapshot(snapshot) {
+        const running = snapshot.running || null;
+        const waiting = Array.isArray(snapshot.waiting) ? snapshot.waiting : [];
+        const terminal = Array.isArray(snapshot.terminal) ? snapshot.terminal : [];
+
+        // Upsert every job we just observed into sessionJobs so the
+        // client retains its own copy after the server forgets the
+        // terminal entry. Iterate terminal LAST so its later-stamped
+        // status wins when a job appears in both lists during a race.
+        const sessionJobs = new Map(this.state.sessionJobs);
+        const stamp = (job) => sessionJobs.set(job.id, { ...job });
+        if (running) stamp(running);
+        waiting.forEach(stamp);
+        terminal.forEach(stamp);
+
+        // The two cap-related signals we publish: queue.waiting.length
+        // and queueFull. Form-gating components subscribe to queueFull.
+        const queueFull = !!running && waiting.length >= 3;
+
+        this.update({
+            queue: { running, waiting },
+            queueFull,
+            sessionJobs,
+            lastPollTime: snapshot.server_time || new Date().toISOString(),
         });
-        this.set('activeJobs', jobs);
     }
 
     /**
-     * Update job status
-     * @param {string} jobId - Job identifier
-     * @param {Object} statusData - Status data
+     * All jobs this client has ever observed this session, sorted for display:
+     * running first, then waiting (in queue order), then terminal jobs newest-first.
+     * @returns {Object[]}
      */
-    updateJobStatus(jobId, statusData) {
-        const jobs = new Map(this.state.activeJobs);
-        const job = jobs.get(jobId);
-        
-        if (job) {
-            const updatedJob = { ...job, ...statusData };
-            jobs.set(jobId, updatedJob);
-            this.set('activeJobs', jobs);
-            
-            // Move completed/failed jobs to history
-            if (statusData.status === 'completed' || statusData.status === 'failed') {
-                this.moveJobToHistory(jobId, updatedJob);
-            }
+    getSessionJobsForDisplay() {
+        const sessionJobs = this.state.sessionJobs;
+        const { running, waiting } = this.state.queue;
+
+        const result = [];
+        const taken = new Set();
+
+        if (running && sessionJobs.has(running.id)) {
+            result.push(sessionJobs.get(running.id));
+            taken.add(running.id);
         }
-    }
+        waiting.forEach((job) => {
+            if (sessionJobs.has(job.id) && !taken.has(job.id)) {
+                result.push(sessionJobs.get(job.id));
+                taken.add(job.id);
+            }
+        });
 
-    /**
-     * Move job to history
-     * @param {string} jobId - Job identifier
-     * @param {Object} jobData - Job data
-     */
-    moveJobToHistory(jobId, jobData) {
-        const jobs = new Map(this.state.activeJobs);
-        jobs.delete(jobId);
-        this.set('activeJobs', jobs);
-        
-        const history = [...this.state.jobHistory, jobData];
-        this.set('jobHistory', history.slice(-50)); // Keep last 50 jobs
-    }
-
-    /**
-     * Remove job
-     * @param {string} jobId - Job identifier
-     */
-    removeJob(jobId) {
-        const jobs = new Map(this.state.activeJobs);
-        jobs.delete(jobId);
-        this.set('activeJobs', jobs);
-    }
-
-    /**
-     * Get active jobs
-     * @returns {Array} Active jobs
-     */
-    getActiveJobs() {
-        return Array.from(this.state.activeJobs.values());
-    }
-
-    /**
-     * Get job by ID
-     * @param {string} jobId - Job identifier
-     * @returns {Object|null} Job data
-     */
-    getJob(jobId) {
-        return this.state.activeJobs.get(jobId) || null;
+        // Any remaining jobs in sessionJobs are terminal (or jobs the
+        // current snapshot didn't include, which means they aged out
+        // server-side). Sort newest-completed first.
+        const terminal = [];
+        sessionJobs.forEach((job, id) => {
+            if (!taken.has(id)) terminal.push(job);
+        });
+        terminal.sort((a, b) => {
+            const aTime = new Date(a.completed_at || a.created_at).getTime();
+            const bTime = new Date(b.completed_at || b.created_at).getTime();
+            return bTime - aTime;
+        });
+        return result.concat(terminal);
     }
 
     // File management
@@ -345,15 +356,17 @@ class AppState {
             cameras: [],
             servers: {},
             currentConfig: null,
-            activeJobs: new Map(),
-            jobHistory: [],
+            queue: { running: null, waiting: [] },
+            queueFull: false,
+            sessionJobs: new Map(),
+            lastPollTime: null,
             processedVideos: [],
             lastFileRefresh: null,
             isLoading: false,
             currentError: null
         };
         this.initializeState();
-        
+
         // Notify all listeners
         this.listeners.forEach((listeners, key) => {
             listeners.forEach(callback => {
@@ -371,11 +384,14 @@ class AppState {
      * @returns {Object} State summary
      */
     getSummary() {
+        const { running, waiting } = this.state.queue;
         return {
             configsCount: this.state.configs.length,
             camerasCount: this.state.cameras.length,
-            activeJobsCount: this.state.activeJobs.size,
-            historyJobsCount: this.state.jobHistory.length,
+            runningJobs: running ? 1 : 0,
+            waitingJobs: waiting.length,
+            sessionJobsCount: this.state.sessionJobs.size,
+            queueFull: this.state.queueFull,
             videosCount: this.state.processedVideos.length,
             isLoading: this.state.isLoading,
             hasError: !!this.state.currentError

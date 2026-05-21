@@ -70,6 +70,12 @@ class DateTimePicker {
         this.state.subscribe('selectedCamera', () => {
             this.updateExtractionButton();
         });
+        // Mirror the queue-full gating used by MultiplierSelector so either
+        // component's update path correctly disables the button when the
+        // server backlog saturates.
+        this.state.subscribe('queueFull', () => {
+            this.updateExtractionButton();
+        });
     }
 
     /**
@@ -247,7 +253,7 @@ class DateTimePicker {
         // Check individual field validity without clearing errors
         const startValid = startValue && this.isStartTimeValid();
         const endValid = endValue && this.isEndTimeValid();
-        
+
         // Also check range validation if both times are valid
         let rangeValid = true;
         if (startValid && endValid) {
@@ -255,7 +261,9 @@ class DateTimePicker {
             rangeValid = validation.valid;
         }
 
-        const formReady = configSelected && cameraSelected && startValid && endValid && rangeValid;
+        const queueFull = this.state.get('queueFull') === true;
+
+        const formReady = configSelected && cameraSelected && startValid && endValid && rangeValid && !queueFull;
 
 
         return formReady;

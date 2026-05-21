@@ -124,15 +124,45 @@ class ConfigInfo(BaseModel):
     servers: Dict[str, str] = Field(..., description="Available servers")
     timelapse_options: List[int] = Field(..., description="Available timelapse multipliers")
 
-class JobStatus(BaseModel):
-    """Job status response model."""
-    job_id: str = Field(..., description="Unique job identifier")
+class Job(BaseModel):
+    """A single extraction job tracked by the server-side queue.
+
+    Lifecycle: ``queued`` -> ``processing`` -> ``completed`` | ``failed``.
+    The queue serializes execution so at most one job is ``processing`` at
+    any moment. Terminal jobs (completed/failed) are retained briefly in
+    the registry so polling clients can observe the transition.
+    """
+    id: str = Field(..., description="Unique job identifier")
     status: JobStatusEnum = Field(..., description="Current job status")
-    progress: int = Field(..., description="Progress percentage (0-100)")
-    message: str = Field(..., description="Status message")
-    created_at: str = Field(..., description="Job creation timestamp")
-    completed_at: Optional[str] = Field(None, description="Job completion timestamp")
-    result: Optional[Dict[str, Any]] = Field(None, description="Job result data")
+    progress: int = Field(0, description="Progress percentage (0-100)")
+    message: str = Field("", description="Status message")
+    created_at: str = Field(..., description="Job creation timestamp (ISO)")
+    started_at: Optional[str] = Field(None, description="When the worker began running the job")
+    completed_at: Optional[str] = Field(None, description="When the job reached a terminal state")
+    request: Dict[str, Any] = Field(..., description="Original extraction request (for display)")
+    result: Optional[Dict[str, Any]] = Field(None, description="Job result data on success")
+    error: Optional[str] = Field(None, description="Error detail on failure")
+    queue_position: Optional[int] = Field(
+        None,
+        description="1-indexed position in the waiting queue. Populated for queued jobs by snapshot.",
+    )
+
+
+class JobsSnapshot(BaseModel):
+    """Server queue state plus a tail of recently-terminal jobs.
+
+    Clients poll ``GET /api/jobs?since=<iso>`` on a 1-second cadence and feed
+    each response back into local state. ``server_time`` is the value the
+    client should send as ``since`` on the next poll, so terminal jobs that
+    finished between two polls are reported exactly once.
+    """
+    running: Optional[Job] = Field(None, description="The job currently being processed, if any")
+    waiting: List[Job] = Field(default_factory=list, description="Queued jobs in FIFO order")
+    terminal: List[Job] = Field(
+        default_factory=list,
+        description="Recently-completed/failed jobs with completed_at > since (TTL-bounded)",
+    )
+    server_time: str = Field(..., description="Server's clock at snapshot time (ISO). Use as next 'since'.")
 
 class FileInfo(BaseModel):
     """File information model for processed videos."""
