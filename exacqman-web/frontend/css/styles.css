@@ -250,6 +250,14 @@ label {
     color: var(--error-color);
 }
 
+/* Queue-full hint shown under the Extract button when the server backlog
+ * (1 running + 3 waiting) is saturated. Visibility is toggled from JS. */
+.queue-full-hint {
+    color: var(--gray-400);
+    font-size: var(--font-size-sm);
+    margin-top: var(--spacing-2);
+}
+
 /* Required field indicator */
 .required {
     color: var(--error-color);
@@ -974,6 +982,62 @@ label {
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+/* Confirmation Modal (in-app replacement for window.confirm) */
+.confirm-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+}
+
+.confirm-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+}
+
+.confirm-modal-card {
+    position: relative;
+    background-color: white;
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    padding: var(--spacing-6);
+    max-width: 440px;
+    width: calc(100% - var(--spacing-8));
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-4);
+}
+
+.confirm-modal-title {
+    margin: 0;
+    font-size: var(--font-size-lg);
+    font-weight: 600;
+    color: var(--gray-800);
+}
+
+.confirm-modal-message {
+    margin: 0;
+    color: var(--gray-700);
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.confirm-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--spacing-3);
+    margin-top: var(--spacing-2);
+}
+
+/* Lock page scroll while the modal is open so users can't accidentally
+ * scroll behind the dialog. */
+body.confirm-modal-open {
+    overflow: hidden;
 }
 
 /* Responsive Design */

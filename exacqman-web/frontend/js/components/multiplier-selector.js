@@ -74,6 +74,10 @@ class MultiplierSelector {
         this.state.subscribe('filenameValid', () => {
             this.updateExtractionButton();
         });
+        // Disable the Extract button while the server's backlog is full.
+        this.state.subscribe('queueFull', () => {
+            this.updateExtractionButton();
+        });
     }
 
     /**
@@ -165,13 +169,15 @@ class MultiplierSelector {
         const multiplierSelected = this.state.get('selectedMultiplier');
         const captionValid = this.state.get('captionValid');
         const filenameValid = this.state.get('filenameValid');
+        const queueFull = this.state.get('queueFull') === true;
 
         return (
             configSelected &&
             cameraSelected &&
             multiplierSelected &&
             captionValid !== false &&
-            filenameValid !== false
+            filenameValid !== false &&
+            !queueFull
         );
     }
 

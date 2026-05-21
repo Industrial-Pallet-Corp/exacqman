@@ -4,6 +4,8 @@
  * Handles file display, sorting, filtering, and bulk operations for processed videos.
  */
 
+import { confirmModal } from '../utils/confirm-modal.js';
+
 class FileBrowser {
     constructor(apiClient, stateManager) {
         this.api = apiClient;
@@ -137,16 +139,23 @@ class FileBrowser {
             this.updateCameraFilter();
         });
 
-        // Listen for job completion to auto-refresh
-        this.state.subscribe('activeJobs', (jobs) => {
-            // Check if any jobs just completed
-            const jobsArray = Array.from(jobs.values());
-            const completedJobs = jobsArray.filter(job => job.status === 'completed');
-            if (completedJobs.length > 0) {
-                // Auto-refresh after a short delay
-                setTimeout(() => {
-                    this.loadFiles();
-                }, 2000);
+        // Auto-refresh the file list when a new job lands in a
+        // terminal "completed" state. We track which job ids we've
+        // already counted so back-to-back polls of the same terminal
+        // entry (within the server's TTL window) don't re-fire.
+        this._refreshedTerminalIds = new Set();
+        this.state.subscribe('sessionJobs', (jobs) => {
+            let sawNewCompletion = false;
+            jobs.forEach((job, id) => {
+                if (job.status === 'completed' && !this._refreshedTerminalIds.has(id)) {
+                    this._refreshedTerminalIds.add(id);
+                    sawNewCompletion = true;
+                }
+            });
+            if (sawNewCompletion) {
+                // Small delay so the file move/cleanup has settled before
+                // we re-list the exports directory.
+                setTimeout(() => this.loadFiles(), 2000);
             }
         });
     }
@@ -603,7 +612,13 @@ class FileBrowser {
      * Handle individual file deletion
      */
     async handleDelete(filename) {
-        if (!confirm(`Are you sure you want to delete "${filename}"?`)) {
+        const ok = await confirmModal({
+            title: 'Delete file?',
+            message: `Are you sure you want to delete "${filename}"?`,
+            confirmLabel: 'Delete',
+            danger: true,
+        });
+        if (!ok) {
             return;
         }
 
@@ -651,7 +666,16 @@ class FileBrowser {
         const selectedFilenames = Array.from(this.selectedFiles);
         if (selectedFilenames.length === 0) return;
 
-        if (!confirm(`Are you sure you want to delete ${selectedFilenames.length} file(s)?`)) {
+        const ok = await confirmModal({
+            title: selectedFilenames.length === 1 ? 'Delete file?' : 'Delete files?',
+            message:
+                selectedFilenames.length === 1
+                    ? `Are you sure you want to delete "${selectedFilenames[0]}"?`
+                    : `Are you sure you want to delete ${selectedFilenames.length} files?`,
+            confirmLabel: 'Delete',
+            danger: true,
+        });
+        if (!ok) {
             return;
         }
 

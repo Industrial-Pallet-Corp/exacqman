@@ -141,12 +141,21 @@ class ExacqManAPI {
     }
 
     /**
-     * Get job status
-     * @param {string} jobId - Job identifier
-     * @returns {Promise<Object>} Job status
+     * Fetch a snapshot of the server-side job queue.
+     *
+     * The server keeps terminal jobs in the registry for a short TTL.
+     * Passing the previous poll's ``server_time`` as ``since`` filters the
+     * ``terminal`` array down to transitions that happened since then, so
+     * each completion is reported exactly once.
+     *
+     * @param {string|null} since - ISO timestamp to filter terminal jobs by.
+     *   Omit / pass null on a fresh page load to skip pre-existing terminal
+     *   entries entirely.
+     * @returns {Promise<Object>} {running, waiting, terminal, server_time}
      */
-    async getJobStatus(jobId) {
-        return await this.request(`/status/${encodeURIComponent(jobId)}`);
+    async getJobsSnapshot(since = null) {
+        const qs = since ? `?since=${encodeURIComponent(since)}` : '';
+        return await this.request(`/jobs${qs}`);
     }
 
     // File management

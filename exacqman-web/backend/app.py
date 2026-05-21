@@ -18,7 +18,7 @@ import json
 import logging
 from datetime import datetime
 
-from api.routes import router
+from api.routes import router, job_queue
 from services.exacqman_service import ExacqManService
 from services.file_service import FileService
 
@@ -66,23 +66,26 @@ app.mount("/", StaticFiles(directory="../frontend", html=True), name="frontend")
 exacqman_service = ExacqManService()
 file_service = FileService()
 
-# Global job tracking (in production, use Redis or database)
-active_jobs: Dict[str, Dict[str, Any]] = {}
-
 @app.on_event("startup")
 async def startup_event():
     """Initialize the application on startup."""
     logger.info("Starting ExacqMan Web Server...")
-    
+
     # Ensure exports directory exists
     os.makedirs("exports", exist_ok=True)
-    
+
+    # Spin up the serial job worker. Subsequent /api/extract calls will
+    # enqueue against this single instance, ensuring one-at-a-time
+    # processing across all clients.
+    await job_queue.start()
+
     logger.info("ExacqMan Web Server started successfully")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on application shutdown."""
     logger.info("Shutting down ExacqMan Web Server...")
+    await job_queue.stop()
 
 @app.get("/")
 async def root():
@@ -92,7 +95,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "extract": "/api/extract",
-            "status": "/api/status/{job_id}",
+            "jobs": "/api/jobs",
             "files": "/api/files",
             "download": "/api/download/{filename}",
             "config": "/api/config/{config_file}",

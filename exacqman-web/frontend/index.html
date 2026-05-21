@@ -96,6 +96,9 @@
                         <span class="btn-text">Extract Footage</span>
                         <span class="btn-loading" style="display: none;">Processing...</span>
                     </button>
+                    <div id="queue-full-hint" class="queue-full-hint" style="display: none;">
+                        Queue is full (1 running, 3 waiting).
+                    </div>
                 </div>
             </form>
         </section>
@@ -126,6 +129,19 @@
     <div id="loading-overlay" class="loading-overlay" style="display: none;">
         <div class="loading-spinner"></div>
         <div class="loading-text">Processing...</div>
+    </div>
+
+    <!-- Confirmation Modal (replaces window.confirm for destructive actions) -->
+    <div id="confirm-modal" class="confirm-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title-el">
+        <div class="confirm-modal-backdrop"></div>
+        <div class="confirm-modal-card">
+            <h3 id="confirm-modal-title-el" class="confirm-modal-title"></h3>
+            <p class="confirm-modal-message"></p>
+            <div class="confirm-modal-actions">
+                <button type="button" class="btn btn-secondary confirm-modal-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary confirm-modal-confirm">OK</button>
+            </div>
+        </div>
     </div>
 
     <!-- Scripts -->

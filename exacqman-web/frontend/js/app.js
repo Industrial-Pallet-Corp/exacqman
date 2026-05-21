@@ -13,15 +13,17 @@ import DateTimePicker from './components/datetime-picker.js';
 import MultiplierSelector from './components/multiplier-selector.js';
 import BoundedTextInput from './components/bounded-text-input.js';
 import JobStatus from './components/job-status.js';
+import QueuePoller from './components/queue-poller.js';
 import FileBrowser from './components/file-browser.js';
+import { confirmModal } from './utils/confirm-modal.js';
 
 class ExacqManApp {
     constructor() {
         this.api = new ExacqManAPI();
         this.state = new AppState();
-        this.jobPoller = null;
+        this.queuePoller = null;
         this.isInitialized = false;
-        
+
         // Initialize components
         this.cameraSelector = null;
         this.dateTimePicker = null;
@@ -30,15 +32,14 @@ class ExacqManApp {
         this.filenameInput = null;
         this.jobStatus = null;
         this.fileBrowser = null;
-        
+
         // Bind methods to preserve context
         this.handleConfigChange = this.handleConfigChange.bind(this);
         this.handleServerChange = this.handleServerChange.bind(this);
         this.handleExtractionSubmit = this.handleExtractionSubmit.bind(this);
         this.handleFileDownload = this.handleFileDownload.bind(this);
         this.handleFileDelete = this.handleFileDelete.bind(this);
-        this.removeJob = this.removeJob.bind(this);
-        
+
         this.init();
     }
 
@@ -103,6 +104,11 @@ class ExacqManApp {
         });
         this.jobStatus = new JobStatus(this.api, this.state);
         this.fileBrowser = new FileBrowser(this.api, this.state);
+
+        // Start the always-on queue poller. One per app; every client
+        // ticks the same shared /api/jobs endpoint at 1 Hz.
+        this.queuePoller = new QueuePoller(this.api, this.state);
+        this.queuePoller.start();
     }
 
     /**
@@ -149,9 +155,11 @@ class ExacqManApp {
             }
         });
 
-        // Active jobs
-        this.state.subscribe('activeJobs', (jobs) => {
-            this.updateJobDisplay();
+        // Queue saturation: toggles the hint under the Extract button and
+        // gates form components via their own subscriptions to queueFull.
+        this.state.subscribe('queueFull', (isFull) => {
+            const hint = document.getElementById('queue-full-hint');
+            if (hint) hint.style.display = isFull ? 'block' : 'none';
         });
 
         // Processed videos - handled by FileBrowser component
@@ -365,22 +373,13 @@ class ExacqManApp {
             const formData = this.getFormData();
             console.log('Form data being sent:', formData);
             
-            // Submit extraction request
+            // Submit extraction request. The new job will appear in the
+            // queue snapshot on the next poll tick (<= 1s), so we don't
+            // need to seed local state here.
             const response = await this.api.extractVideo(formData);
-            
+
             if (response.success && response.data?.job_id) {
-                // Add job to tracking
-                this.state.addJob(response.data.job_id, {
-                    status: 'queued',
-                    message: 'Job queued for processing',
-                    progress: 0,
-                    request: formData
-                });
-                
-                // Start polling for job status
-                this.jobStatus.startPolling(response.data.job_id);
-                
-                this.showSuccess('Video extraction started successfully');
+                this.showSuccess('Video extraction queued');
 
                 // The form is intentionally left as-is so the user's
                 // selections (datetime, multiplier, caption, filename)
@@ -390,10 +389,17 @@ class ExacqManApp {
             } else {
                 throw new Error('Invalid response from server');
             }
-            
+
         } catch (error) {
             console.error('Extraction failed:', error);
-            this.showError(error.getUserMessage ? error.getUserMessage() : 'Failed to start extraction');
+            // Surface the backlog-full message verbatim so the user knows
+            // they only need to wait, not retry differently. Other errors
+            // get the generic friendly message.
+            if (error instanceof APIError && error.status === 429) {
+                this.showError(error.data?.detail || error.message);
+            } else {
+                this.showError(error.getUserMessage ? error.getUserMessage() : 'Failed to start extraction');
+            }
         } finally {
             this.state.setLoading(false);
         }
@@ -422,7 +428,13 @@ class ExacqManApp {
      * Handle file deletion
      */
     async handleFileDelete(filename) {
-        if (!confirm(`Are you sure you want to delete "${filename}"?`)) {
+        const ok = await confirmModal({
+            title: 'Delete file?',
+            message: `Are you sure you want to delete "${filename}"?`,
+            confirmLabel: 'Delete',
+            danger: true,
+        });
+        if (!ok) {
             return;
         }
 
@@ -690,48 +702,6 @@ class ExacqManApp {
         select.disabled = true;
         select.required = false;
         this.state.set('selectedServer', null);
-    }
-
-    /**
-     * Update job display
-     */
-    updateJobDisplay() {
-        const jobList = document.getElementById('job-list');
-        if (!jobList) return;
-        
-        const jobs = this.state.getActiveJobs();
-        
-        if (jobs.length === 0) {
-            jobList.innerHTML = '<div class="no-jobs">No active jobs</div>';
-            return;
-        }
-        
-        jobList.innerHTML = jobs.map(job => this.createJobElement(job)).join('');
-    }
-
-    /**
-     * Create job element HTML
-     */
-    createJobElement(job) {
-        return `
-            <div class="job-item ${job.status}">
-                <div class="job-header">
-                    <span class="job-status ${job.status}">${job.status}</span>
-                </div>
-                <div class="job-progress">
-                    <div class="job-progress-bar" style="width: ${job.progress || 0}%"></div>
-                </div>
-                <div class="job-message">${job.message || ''}</div>
-            </div>
-        `;
-    }
-
-
-    /**
-     * Remove job from tracking
-     */
-    removeJob(jobId) {
-        this.state.removeJob(jobId);
     }
 
     /**
