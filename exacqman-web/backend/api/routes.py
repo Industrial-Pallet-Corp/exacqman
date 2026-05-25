@@ -18,7 +18,7 @@ from api.models import (
 from services.exacqman_service import ExacqManService
 from services.file_service import FileService
 from services.config_service import ConfigService
-from services.job_queue import JobQueue, BacklogFullError
+from services.job_queue import JobQueue, BacklogFullError, job_log_path
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,27 @@ async def get_jobs_snapshot(
     # opened the page".
     effective_since = since if since is not None else datetime.now()
     return await job_queue.snapshot(since=effective_since)
+
+
+@router.get("/jobs/{job_id}/log")
+async def download_job_log(job_id: str):
+    """
+    Download the captured log snippet for a failed (or completed) job.
+
+    Files are written on the worker thread the moment a job fails, so a
+    404 here means either the job is still running, succeeded without
+    producing a log, or the file has been manually pruned. The response
+    is plain text served as an attachment so the browser triggers a
+    save dialog rather than rendering inline.
+    """
+    log_path = job_log_path(job_id)
+    if not log_path.exists():
+        raise HTTPException(status_code=404, detail="Log not available for this job")
+    return FileResponse(
+        path=str(log_path),
+        media_type="text/plain",
+        filename=f"job-{job_id}.log",
+    )
 
 
 @router.get("/files", response_model=List[FileInfo])

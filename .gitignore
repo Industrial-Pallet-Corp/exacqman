@@ -176,6 +176,7 @@ cython_debug/
 # ExacqMan Web Application
 exacqman-web/uploads/
 exacqman-web/exports/
+exacqman-web/logs/
 exacqman-web/backend/__pycache__/
 exacqman-web/backend/*.pyc
 exacqman-web/backend/.env

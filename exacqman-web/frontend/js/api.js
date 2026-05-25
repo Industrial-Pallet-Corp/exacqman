@@ -211,6 +211,17 @@ class ExacqManAPI {
     }
 
     /**
+     * Get the download URL for a failed job's captured log snippet.
+     * The backend returns 404 if the log does not exist; callers should
+     * only expose this link when the Job has ``log_available === true``.
+     * @param {string} jobId - Job identifier
+     * @returns {string} Log download URL
+     */
+    getJobLogURL(jobId) {
+        return `${this.baseURL}/jobs/${encodeURIComponent(jobId)}/log`;
+    }
+
+    /**
      * Format file size for display
      * @param {number} bytes - File size in bytes
      * @returns {string} Formatted file size
