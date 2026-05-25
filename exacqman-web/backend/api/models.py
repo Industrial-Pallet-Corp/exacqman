@@ -141,7 +141,15 @@ class Job(BaseModel):
     completed_at: Optional[str] = Field(None, description="When the job reached a terminal state")
     request: Dict[str, Any] = Field(..., description="Original extraction request (for display)")
     result: Optional[Dict[str, Any]] = Field(None, description="Job result data on success")
-    error: Optional[str] = Field(None, description="Error detail on failure")
+    error: Optional[str] = Field(None, description="Raw error detail on failure (technical; not user-facing)")
+    log_available: bool = Field(
+        False,
+        description=(
+            "True when a per-job log snippet is downloadable from "
+            "GET /api/jobs/{id}/log. Set on failure once the captured "
+            "records have been flushed to disk."
+        ),
+    )
     queue_position: Optional[int] = Field(
         None,
         description="1-indexed position in the waiting queue. Populated for queued jobs by snapshot.",

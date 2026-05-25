@@ -31,6 +31,7 @@ import logging
 import uuid
 from collections import deque
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, List, Optional
 
 from api.models import ExtractRequest, Job, JobStatusEnum, JobsSnapshot
@@ -45,6 +46,94 @@ running job does not count toward this cap."""
 TERMINAL_TTL_SECONDS = 60
 """How long terminal jobs are retained in the registry. Generously longer
 than the client poll interval so no transition is missed in normal use."""
+
+JOB_LOG_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "logs"
+)
+"""Directory where per-job log snippets are written on failure. Lives next
+to the backend so it survives across server restarts and is easy to inspect
+out-of-band. The directory is shared with any future general server logs;
+job-specific files use the ``{job_id}.log`` convention (UUID stems) so they
+remain unambiguous next to anything else that lands here. Currently kept
+indefinitely -- cleanup is a separate maintenance concern."""
+
+FRIENDLY_FAILURE_MESSAGE = "Video extraction failed: server error"
+"""User-facing message attached to a failed Job. The verbose / technical
+detail lives in the per-job log file accessible via /api/jobs/{id}/log."""
+
+_CAPTURED_LOGGER_NAMES = ("services", "api")
+"""Logger namespaces whose records are folded into the per-job log capture.
+These cover everything the extract pipeline emits (CLI driver, job queue,
+route layer) without dragging in unrelated uvicorn / asyncio noise."""
+
+
+class _JobLogHandler(logging.Handler):
+    """Buffers log records for the lifetime of a single job run.
+
+    Attached to the loggers listed in ``_CAPTURED_LOGGER_NAMES`` for the
+    duration of ``_run_job`` and detached in a ``finally`` block so a
+    crashing job can never leak the handler. Records are formatted on
+    ``emit`` (not on flush) so the timestamps reflect when the event
+    happened, not when we wrote it to disk.
+    """
+
+    _FORMATTER = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.setFormatter(self._FORMATTER)
+        self.records: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(self.format(record))
+        except Exception:  # pragma: no cover - logging must never raise
+            self.handleError(record)
+
+
+def _attach_log_capture() -> _JobLogHandler:
+    """Install a fresh capture handler on the project loggers and return it."""
+    handler = _JobLogHandler()
+    for name in _CAPTURED_LOGGER_NAMES:
+        logging.getLogger(name).addHandler(handler)
+    return handler
+
+
+def _detach_log_capture(handler: _JobLogHandler) -> None:
+    """Remove ``handler`` from every logger we attached it to."""
+    for name in _CAPTURED_LOGGER_NAMES:
+        logging.getLogger(name).removeHandler(handler)
+
+
+def _write_job_log(job_id: str, handler: _JobLogHandler, exc: BaseException) -> bool:
+    """Flush the captured records plus a final exception block to disk.
+
+    Returns True when the file was written successfully so callers can
+    set ``Job.log_available`` accordingly. Any IO failure is logged and
+    swallowed -- a job that already failed shouldn't fail twice on top.
+    """
+    try:
+        JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        path = JOB_LOG_DIR / f"{job_id}.log"
+        # Footer carries the raw exception so the log is self-contained
+        # even if the exception was raised after the last logged record.
+        footer = (
+            "\n--- exception ---\n"
+            f"{type(exc).__name__}: {exc}\n"
+        )
+        path.write_text("\n".join(handler.records) + footer, encoding="utf-8")
+        return True
+    except OSError as write_err:
+        logger.error("Failed to write job log %s: %s", job_id, write_err)
+        return False
+
+
+def job_log_path(job_id: str) -> Path:
+    """Resolve where the on-disk log for ``job_id`` lives. Caller checks existence."""
+    return JOB_LOG_DIR / f"{job_id}.log"
 
 
 class BacklogFullError(Exception):
@@ -201,7 +290,14 @@ class JobQueue:
 
     async def _run_job(self, job: Job) -> None:
         """Drive a single extraction. Mutates ``job`` in place, then moves
-        it to the terminal list under the lock."""
+        it to the terminal list under the lock.
+
+        For the duration of the run we attach a log capture handler so
+        that, on failure, we can write a self-contained log snippet to
+        disk for the user to download. The handler is detached in a
+        ``finally`` block so it's safe against any exception path.
+        """
+        log_handler = _attach_log_capture()
         try:
             request = ExtractRequest(**job.request)
 
@@ -224,15 +320,22 @@ class JobQueue:
                 self._running = None
             logger.info(f"Job {job.id} completed")
         except Exception as exc:
+            # User-facing message stays terse and generic; the verbose
+            # CalledProcessError repr / traceback / per-stage records all
+            # live in the downloadable log snippet instead.
             error_msg = str(exc)
+            log_written = _write_job_log(job.id, log_handler, exc)
             async with self._lock:
                 job.status = JobStatusEnum.FAILED
-                job.message = f"Video extraction failed: {error_msg}"
+                job.message = FRIENDLY_FAILURE_MESSAGE
                 job.completed_at = datetime.now().isoformat()
                 job.error = error_msg
+                job.log_available = log_written
                 self._terminal.append(job)
                 self._running = None
             logger.error(f"Job {job.id} failed: {error_msg}")
+        finally:
+            _detach_log_capture(log_handler)
 
 
 def _parse_iso(value: str) -> datetime:

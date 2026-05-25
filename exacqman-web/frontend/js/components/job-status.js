@@ -93,8 +93,6 @@ class JobStatus {
     createProgressBar(job) {
         if (job.status === 'processing') {
             const progress = Math.max(0, Math.min(100, job.progress || 0));
-            // No superimposed percent label; the status line below the bar
-            // already carries it (e.g. "Timelapsing footage... (5%)").
             return `
                 <div class="job-progress">
                     <div class="job-progress-bar" style="width: ${progress}%"></div>
@@ -111,6 +109,18 @@ class JobStatus {
                 <button class="btn btn-sm btn-primary" onclick="app.handleFileDownload('${this.escapeAttr(job.result.filename)}')">
                     Download
                 </button>
+            </div>`;
+        }
+        // Failed jobs show their friendly summary in the message; the
+        // raw technical detail lives in the per-job log snippet which
+        // we expose as a plain anchor with the `download` attribute so
+        // the browser saves it without any JS roundtrip.
+        if (job.status === 'failed' && job.log_available && this.api?.getJobLogURL) {
+            const url = this.escapeAttr(this.api.getJobLogURL(job.id));
+            return `<div class="job-actions">
+                <a class="btn btn-sm btn-secondary" download href="${url}">
+                    Download log
+                </a>
             </div>`;
         }
         return '';
@@ -133,9 +143,8 @@ class JobStatus {
         if (job.result?.filename) {
             meta.push(`File: ${this.escape(job.result.filename)}`);
         }
-        if (job.error) {
-            meta.push(`Error: ${this.escape(job.error)}`);
-        }
+        // The raw error is intentionally not surfaced here -- the friendly
+        // status message and the downloadable log together replace it.
         return meta.length > 0 ? `<div class="job-metadata">${meta.join(' \u2022 ')}</div>` : '';
     }
 
