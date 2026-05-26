@@ -13,7 +13,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, Any, Callable, Optional, Tuple
+from typing import Dict, Any, Callable, NamedTuple, Optional, Tuple
 
 from api.models import ExtractRequest
 
@@ -43,6 +43,24 @@ _STAGE_MESSAGES = {
 # EMA smoothing factor for the live rate label. tqdm uses 0.3 as its default
 # for the same purpose; the higher the value, the more responsive but jumpier.
 _RATE_SMOOTHING = 0.3
+
+
+class _CliRunResult(NamedTuple):
+    """Structured outcome of consuming the CLI's JSON event stream.
+
+    ``output_path`` is the value of the CLI's ``done.output`` event (the
+    on-disk path of the file the CLI produced), or ``None`` if the CLI
+    never emitted a ``done`` event (typically because it exited with an
+    error). Treated as the authoritative location of the produced
+    file -- the web service no longer scans the workspace to discover it.
+
+    ``error`` is the last ``error`` event the CLI emitted, or ``None``
+    if no error was reported. Used by the caller to build a useful
+    failure message when the subprocess exits non-zero.
+    """
+    output_path: Optional[str]
+    error: Optional[Dict[str, Any]]
+
 
 class ExacqManService:
     """Service for interacting with ExacqMan CLI tool."""
@@ -125,7 +143,7 @@ class ExacqManService:
             # shutdown). Without it, SIGTERM to the web server would leave
             # an orphan ffmpeg / download running in the background.
             try:
-                cli_error: Optional[Dict[str, Any]] = await self._consume_cli_events(
+                cli_result = await self._consume_cli_events(
                     process, progress_callback
                 )
 
@@ -133,7 +151,7 @@ class ExacqManService:
 
                 if process.returncode != 0:
                     error_msg = (
-                        cli_error["message"] if cli_error
+                        cli_result.error["message"] if cli_result.error
                         else f"Extract command failed with return code {process.returncode}"
                     )
                     logger.error(error_msg)
@@ -142,8 +160,28 @@ class ExacqManService:
                         process.returncode, cmd_args, error_msg
                     )
 
-                final_path = await self._move_to_exports(output_filename)
-                await self._cleanup_intermediate_files(output_filename)
+                # The CLI exited successfully; we now trust its
+                # ``done.output`` event as the authoritative location of
+                # the produced file. If we somehow got here without a
+                # ``done`` event (CLI regression), fail loudly rather
+                # than silently glob-scanning the workspace as we used
+                # to -- silent rescue would mask the contract violation.
+                if not cli_result.output_path:
+                    raise RuntimeError(
+                        "CLI exited 0 but did not emit a `done.output` event. "
+                        "The web service cannot determine which file was produced. "
+                        "This is a CLI integration regression."
+                    )
+
+                # The CLI's path may be absolute or relative to its cwd
+                # (our `working_directory`). `Path.resolve()` against the
+                # cwd handles both cases.
+                source_path = (self.working_directory / cli_result.output_path).resolve()
+                dest_filename = f"{output_filename}.mp4"
+                final_path = await self._move_to_exports(source_path, dest_filename)
+                await self._cleanup_intermediate_files(
+                    output_filename, request.timelapse_multiplier
+                )
 
                 return {
                     "operation": "extract",
@@ -297,12 +335,23 @@ class ExacqManService:
         self,
         process: asyncio.subprocess.Process,
         progress_callback: Callable[..., None],
-    ) -> Optional[Dict[str, Any]]:
+    ) -> _CliRunResult:
         """Read JSON events from the CLI subprocess and drive progress_callback.
 
-        Returns the last `error` event payload (if any), so the caller can use
-        its message when the subprocess exits non-zero. Non-JSON lines (e.g.
-        Python tracebacks, stray prints) are logged and otherwise ignored.
+        Returns a `_CliRunResult` carrying:
+          * `output_path` -- the value of the CLI's ``done.output`` event,
+            i.e. the on-disk path of the file the CLI produced. ``None`` if
+            no ``done`` event ever arrived (the CLI either errored or
+            exited abnormally). This is the authoritative location of the
+            produced file; the web service no longer scans the workspace
+            to find it.
+          * `error` -- the last ``error`` event payload (if any), so the
+            caller can include its message in the failure surface when
+            the subprocess exits non-zero.
+
+        Non-JSON lines (Python tracebacks, stray prints, ffmpeg output
+        that leaks past the JSON reporter) are logged and otherwise
+        ignored.
 
         The callback is invoked as
         ``progress_callback(pct, message, rate_label=...)`` where
@@ -322,6 +371,10 @@ class ExacqManService:
         buffer = b""
         current_stage: Optional[str] = None
         last_error: Optional[Dict[str, Any]] = None
+        # The CLI emits exactly one ``done`` event on success; capture its
+        # ``output`` payload here so the caller can move the file by path
+        # rather than by glob.
+        done_output: Optional[str] = None
 
         # Per-stage rate state: stage -> (prev_current, prev_ts, ema_rate).
         # Reset implicitly when the stage advances (we only ever look up the
@@ -385,7 +438,12 @@ class ExacqManService:
                             rate_label=rate_label,
                         )
                 elif kind == "done":
+                    # Capture the path so the caller can move the actual
+                    # file the CLI produced, rather than glob-scanning the
+                    # workspace for "the most likely candidate".
                     output = event.get("output")
+                    if isinstance(output, str) and output:
+                        done_output = output
                     msg = "Footage extraction completed successfully"
                     if output:
                         msg = f"{msg}: {Path(output).name}"
@@ -404,7 +462,7 @@ class ExacqManService:
                 elif kind == "warning":
                     logger.warning("CLI warning: %s", event.get("message", ""))
 
-        return last_error
+        return _CliRunResult(output_path=done_output, error=last_error)
 
     @staticmethod
     def _compute_rate_label(
@@ -523,116 +581,113 @@ class ExacqManService:
         """
         return f"{datetime_obj.hour:02d}{datetime_obj.minute:02d}"
     
-    async def _cleanup_intermediate_files(self, base_filename: str = None):
+    async def _cleanup_intermediate_files(
+        self,
+        output_stem: str,
+        multiplier: int,
+    ) -> None:
+        """Remove the known intermediates this extract left behind.
+
+        The CLI's extract pipeline writes three files in the working
+        directory, each derived deterministically from the
+        ``--output`` argument (here ``output_stem``):
+
+          1. ``{stem}.mp4``                       -- raw download from
+                                                     the exacqvision server
+          2. ``{stem}_{multiplier}x.mp4``         -- timelapsed
+                                                     pre-compression version
+          3. ``{stem}_{multiplier}x_libx264_*.mp4`` -- final compressed,
+                                                     already moved to
+                                                     ``exports/`` by
+                                                     ``_move_to_exports``
+
+        This method removes (1) and (2) by exact path; (3) was already
+        moved by the time we get here so there's nothing to do for it.
+
+        We deliberately do *not* glob the workspace for ``*.tmp`` /
+        ``*.log`` / ``temp_*`` / similar as the previous implementation
+        did -- those globs scanned the entire ExacqMan repo root and
+        could destroy unrelated files (per-job logs, hand-edited
+        scratch files, the git internals on some setups). If a future
+        intermediate gets added to the pipeline, it should be named
+        deterministically from ``output_stem`` and removed here by
+        exact path.
+
+        Failures to unlink are logged but never raised; cleanup must
+        not fail an otherwise successful job.
         """
-        Clean up intermediate files created during video processing.
-        
-        This removes temporary files that ExacqMan creates during processing
-        but keeps only the final compressed output.
-        
-        Args:
-            base_filename: Base filename to clean up specific intermediate files
-        """
-        try:
-            cleaned_files = []
-            
-            # Clean up specific intermediate files if base_filename is provided
-            if base_filename:
-                base_name = base_filename.replace('.mp4', '')
-                
-                # Patterns for intermediate files specific to this extraction
-                specific_patterns = [
-                    f"{base_name}.mp4",  # Raw export
-                    f"{base_name}_*.mp4",  # Timelapsed version (before compression)
-                ]
-                
-                for pattern in specific_patterns:
-                    for file_path in self.working_directory.glob(pattern):
-                        if file_path.is_file():
-                            # Skip the final compressed file
-                            if not any(compression in file_path.name for compression in ['_libx264_', '_high', '_medium', '_low']):
-                                file_path.unlink()
-                                cleaned_files.append(file_path.name)
-                                logger.info(f"Cleaned up intermediate file: {file_path.name}")
-            
-            # Clean up general temporary files
-            general_patterns = [
-                "*.tmp",
-                "*_temp.*",
-                "*_intermediate.*",
-                "temp_*",
-                "*.log"
-            ]
-            
-            for pattern in general_patterns:
-                for file_path in self.working_directory.glob(pattern):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        cleaned_files.append(file_path.name)
-            
-            if cleaned_files:
-                logger.info(f"Cleaned up {len(cleaned_files)} intermediate files: {cleaned_files}")
-            else:
-                logger.info("No intermediate files found to clean up")
-                
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
-            # Don't raise the exception as cleanup failure shouldn't fail the job
+        intermediates = (
+            self.working_directory / f"{output_stem}.mp4",
+            self.working_directory / f"{output_stem}_{multiplier}x.mp4",
+        )
+
+        removed: list[str] = []
+        for path in intermediates:
+            try:
+                if path.is_file():
+                    path.unlink()
+                    removed.append(path.name)
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove intermediate file %s: %s",
+                    path, e,
+                )
+
+        if removed:
+            logger.info("Cleaned up intermediate files: %s", removed)
+        else:
+            logger.info(
+                "No intermediate files found to clean up "
+                "(stem=%s, multiplier=%s)",
+                output_stem, multiplier,
+            )
     
-    async def _move_to_exports(self, filename: str) -> str:
-        """
-        Move the final compressed file to the exports directory.
-        
+    async def _move_to_exports(
+        self,
+        source_path: Path,
+        dest_filename: str,
+    ) -> str:
+        """Move the CLI's reported output file to ``exports/`` under a clean name.
+
         Args:
-            filename: Base name of the file to move (exacqman.py may create variations)
-            
+            source_path: Absolute path to the file the CLI produced (the
+                value of ``done.output`` from the CLI's JSON event stream,
+                resolved against the CLI's working directory). Must exist.
+            dest_filename: The on-disk name to use under ``exports/``,
+                including extension (e.g. ``"name.mp4"``). The rename
+                deliberately hides CLI-internal naming details
+                (compression suffix, codec tag, etc.) from end users.
+
         Returns:
-            Path to the file in exports directory
+            Absolute path to the moved file under ``exports/``.
+
+        Raises:
+            FileNotFoundError: ``source_path`` does not exist. This
+                indicates either a CLI regression (``done.output``
+                pointed nowhere) or a race with another job; we
+                deliberately do not glob-rescue here because that's the
+                very behavior this refactor eliminated.
         """
-        try:
-            # Create exports directory if it doesn't exist
-            exports_dir = self.working_directory / "exacqman-web" / "exports"
-            exports_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Look for the final compressed file with any compression level
-            base_name = filename.replace('.mp4', '')  # Remove .mp4 if present
-            # Sanitize base_name to match what CLI creates (spaces become underscores)
-            base_name = base_name.replace(" ", "_")
-            source_path = None
-            
-            # Try to find the final compressed file with libx264 pattern
-            for file_path in self.working_directory.glob(f"{base_name}_*_libx264_*.mp4"):
-                if file_path.is_file():
-                    source_path = file_path
-                    break
-            
-            # If not found, try the specific high compression pattern
-            if not source_path:
-                final_filename = f"{base_name}_libx264_high.mp4"
-                source_path = self.working_directory / final_filename
-                if not source_path.exists():
-                    source_path = None
-            
-            # Fallback to original filename if no compressed version found
-            if not source_path:
-                source_path = self.working_directory / filename
-                if not source_path.exists():
-                    source_path = self.working_directory / f"{filename}.mp4"
-            
-            if not source_path or not source_path.exists():
-                raise FileNotFoundError(f"Final compressed file not found for: {filename}")
-            
-            # Move to exports directory with clean filename
-            clean_filename = f"{base_name}.mp4"
-            dest_path = exports_dir / clean_filename
-            shutil.move(str(source_path), str(dest_path))
-            
-            logger.info(f"Moved final compressed file {source_path.name} to exports directory as {clean_filename}")
-            return str(dest_path)
-            
-        except Exception as e:
-            logger.error(f"Error moving file to exports: {str(e)}")
-            raise
+        if not source_path.is_file():
+            raise FileNotFoundError(
+                f"CLI reported output file does not exist: {source_path}"
+            )
+
+        exports_dir = self.working_directory / "exacqman-web" / "exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_path = exports_dir / dest_filename
+        # `shutil.move` handles cross-filesystem moves (rename when
+        # possible, copy + unlink otherwise) and overwrites an existing
+        # destination, which is what we want when the user re-runs an
+        # extract with the same filename.
+        shutil.move(str(source_path), str(dest_path))
+        logger.info(
+            "Moved %s to exports as %s",
+            source_path.name,
+            dest_filename,
+        )
+        return str(dest_path)
     
     def validate_config_file(self, config_path: str) -> bool:
         """
