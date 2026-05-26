@@ -6,12 +6,14 @@ Handles interaction with the ExacqMan CLI tool for video processing operations.
 
 import asyncio
 import json
-import subprocess
 import logging
-import time
-from typing import Dict, Any, Callable, Optional, Tuple
-from pathlib import Path
+import os
 import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+from typing import Dict, Any, Callable, Optional, Tuple
 
 from api.models import ExtractRequest
 
@@ -102,11 +104,20 @@ class ExacqManService:
 
             progress_callback(0, "Starting video extraction...")
 
+            # `start_new_session=True` makes the child call setsid() before
+            # execvp, so it becomes the leader of a fresh process group.
+            # Every descendant the CLI fork-execs (ffmpeg, ffprobe, the
+            # exacqvision client, ...) inherits that pgid by default. When
+            # we cancel a job we can then kill the entire group with one
+            # killpg() call -- this is how we guarantee no orphaned ffmpeg
+            # processes survive a server shutdown or job cancellation.
+            # See `_terminate_subprocess_if_alive` for the teardown half.
             process = await asyncio.create_subprocess_exec(
                 *cmd_args,
                 cwd=self.working_directory,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # Combine stderr with stdout
+                start_new_session=True,
             )
 
             # The finally block guarantees the child is reaped even when
@@ -157,21 +168,104 @@ class ExacqManService:
     async def _terminate_subprocess_if_alive(
         process: asyncio.subprocess.Process,
     ) -> None:
-        """Make sure a CLI subprocess is dead before we release control.
+        """Make sure a CLI subprocess (and all of its descendants) are dead
+        before we release control.
 
         Normal happy-path completion has ``returncode`` already set and this
         is a no-op. The interesting case is when our coroutine is being
-        cancelled (server shutting down, request aborted) -- the child is
-        still running and would otherwise leak as an orphan ffmpeg /
-        downloader. We try SIGTERM first, give it a short grace window,
-        then escalate to SIGKILL.
+        cancelled (server shutting down, request aborted) -- the CLI is
+        still running, *and* the CLI itself has typically forked an ffmpeg
+        and/or an exacqvision download in progress. Just signalling the
+        CLI alone leaks those grandchildren as orphans reparented to init.
 
-        Cleanup never raises: any failure to signal a process that's
+        On POSIX we use the standard "kill the whole process group" trick:
+        the CLI was spawned with ``start_new_session=True`` so it sits
+        atop its own pgid; ``os.killpg(pgid, sig)`` then takes the whole
+        family down at once. SIGTERM is delivered first with a 3s grace
+        window, escalating to SIGKILL if anything in the group hasn't
+        exited (a slow ffmpeg trying to flush, a wedged network read).
+
+        On Windows process groups work differently and ``os.killpg`` /
+        ``os.getpgid`` don't exist, so we fall back to signalling the CLI
+        process directly via ``process.terminate()`` / ``process.kill()``.
+        Web service operations on Windows won't get the orphan-cleanup
+        benefit, but the module still imports and the immediate process
+        still dies cleanly.
+
+        Cleanup never raises: any failure to signal a target that's
         already exited (``ProcessLookupError``) is treated as success.
         """
         if process.returncode is not None:
             return
 
+        # Prefer the POSIX group-kill path; fall back to single-process on
+        # platforms without ``os.killpg`` (i.e. Windows).
+        if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+            await ExacqManService._terminate_process_group(process)
+        else:
+            await ExacqManService._terminate_single_process(process)
+
+    @staticmethod
+    async def _terminate_process_group(
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        """POSIX teardown: SIGTERM the pgid, wait 3s, escalate to SIGKILL.
+
+        Resolves the pgid from the child's pid. If the child has already
+        exited between our ``returncode`` check and this call,
+        ``getpgid`` raises ``ProcessLookupError`` and we exit silently.
+        """
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, OSError):
+            return  # child raced to exit; nothing to signal.
+
+        def _killpg(sig: int) -> bool:
+            """Best-effort group signal; returns False if the group is gone."""
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                # Shouldn't happen for our own child, but never raise from cleanup.
+                logger.warning(
+                    "Lacked permission to signal pgid %s; leaving subprocess alone",
+                    pgid,
+                )
+                return False
+            return True
+
+        if not _killpg(signal.SIGTERM):
+            return
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3.0)
+            logger.info(
+                "CLI subprocess %s (pgid %s) and descendants terminated cleanly",
+                process.pid, pgid,
+            )
+            return
+        except asyncio.TimeoutError:
+            logger.warning(
+                "CLI subprocess group %s did not exit within 3s of SIGTERM; sending SIGKILL",
+                pgid,
+            )
+
+        _killpg(signal.SIGKILL)
+        try:
+            await process.wait()
+        except Exception:  # pragma: no cover - defensive; wait() shouldn't raise here
+            pass
+
+    @staticmethod
+    async def _terminate_single_process(
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        """Windows / no-killpg fallback: SIGTERM-equivalent, then kill.
+
+        Doesn't reach grandchildren, but at least the immediate CLI
+        process dies and the module stays portable.
+        """
         try:
             process.terminate()
         except ProcessLookupError:
@@ -179,7 +273,10 @@ class ExacqManService:
 
         try:
             await asyncio.wait_for(process.wait(), timeout=3.0)
-            logger.info("CLI subprocess %s terminated cleanly on shutdown", process.pid)
+            logger.info(
+                "CLI subprocess %s terminated cleanly on shutdown",
+                process.pid,
+            )
             return
         except asyncio.TimeoutError:
             logger.warning(
