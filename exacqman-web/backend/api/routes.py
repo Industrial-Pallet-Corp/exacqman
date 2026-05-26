@@ -30,8 +30,13 @@ file_service = FileService()
 config_service = ConfigService()
 
 # Single shared serial job queue. The worker task is started/stopped via
-# the FastAPI lifespan hooks in app.py.
-job_queue = JobQueue(run_extract=exacqman_service.extract_video_with_progress)
+# the FastAPI lifespan hooks in app.py. plan_filename lets the queue pre-
+# populate Job.filename the moment a job starts processing, so the UI can
+# show the planned output filename in the job header during the run.
+job_queue = JobQueue(
+    run_extract=exacqman_service.extract_video_with_progress,
+    plan_filename=exacqman_service.planned_output_filename,
+)
 
 
 @router.post("/extract", response_model=ApiResponse)

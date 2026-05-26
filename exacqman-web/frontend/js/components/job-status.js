@@ -58,14 +58,26 @@ class JobStatus {
         const statusClass = this.getStatusClass(status);
         const progressBar = this.createProgressBar(job);
         const actions = this.createJobActions(job);
-        const created = this.formatDate(job.created_at);
         const completed = job.completed_at ? this.formatDate(job.completed_at) : null;
+
+        // Whenever we know the output filename we show it in the header
+        const headerFilename = job.filename || job.result?.filename;
+        const showFilename = !!headerFilename;
+        const headerLabel = showFilename
+            ? this.escape(headerFilename)
+            : this.escape(this.formatDate(job.created_at));
+        const headerClass = showFilename ? 'job-header-filename' : 'job-created';
+
+        // Rate label sits at the right end of the stage/percentage row
+        const rateBlock = (job.status === 'processing' && job.rate_label)
+            ? `<span class="job-rate">${this.escape(job.rate_label)}</span>`
+            : '';
 
         return `
             <div class="job-item ${statusClass}" data-job-id="${job.id}">
                 <div class="job-header">
                     <div class="job-info">
-                        <span class="job-created">${created}</span>
+                        <span class="${headerClass}">${headerLabel}</span>
                     </div>
                     <div class="job-status">
                         <span class="job-status-badge ${statusClass}">${this.formatStatus(job)}</span>
@@ -76,7 +88,10 @@ class JobStatus {
                 ${progressBar}
 
                 <div class="job-details">
-                    <div class="job-message">${this.escape(job.message || '')}</div>
+                    <div class="job-message-row">
+                        <div class="job-message">${this.escape(job.message || '')}</div>
+                        ${rateBlock}
+                    </div>
                     ${this.createJobMetadata(job)}
                 </div>
 
@@ -139,9 +154,6 @@ class JobStatus {
         if (req.start_datetime && req.end_datetime) {
             const duration = new Date(req.end_datetime) - new Date(req.start_datetime);
             meta.push(`Duration: ${this.formatDuration(duration)}`);
-        }
-        if (job.result?.filename) {
-            meta.push(`File: ${this.escape(job.result.filename)}`);
         }
         // The raw error is intentionally not surfaced here -- the friendly
         // status message and the downloadable log together replace it.

@@ -8,7 +8,8 @@ import asyncio
 import json
 import subprocess
 import logging
-from typing import Dict, Any, Callable, Optional
+import time
+from typing import Dict, Any, Callable, Optional, Tuple
 from pathlib import Path
 import shutil
 
@@ -37,6 +38,10 @@ _STAGE_MESSAGES = {
     "compression":     "Compressing video",
 }
 
+# EMA smoothing factor for the live rate label. tqdm uses 0.3 as its default
+# for the same purpose; the higher the value, the more responsive but jumpier.
+_RATE_SMOOTHING = 0.3
+
 class ExacqManService:
     """Service for interacting with ExacqMan CLI tool."""
     
@@ -47,7 +52,7 @@ class ExacqManService:
         self.exacqman_path = str(Path(__file__).parent.parent.parent.parent / "exacqman.py")
         self.working_directory = Path(__file__).parent.parent.parent.parent  # ExacqMan root directory
     
-    async def extract_video_with_progress(self, request: ExtractRequest, progress_callback: Callable[[int, str], None]) -> Dict[str, Any]:
+    async def extract_video_with_progress(self, request: ExtractRequest, progress_callback: Callable[..., None]) -> Dict[str, Any]:
         """
         Extract video with real-time progress tracking.
         
@@ -104,32 +109,39 @@ class ExacqManService:
                 stderr=asyncio.subprocess.STDOUT,  # Combine stderr with stdout
             )
 
-            cli_error: Optional[Dict[str, Any]] = await self._consume_cli_events(
-                process, progress_callback
-            )
-
-            await process.wait()
-
-            if process.returncode != 0:
-                error_msg = (
-                    cli_error["message"] if cli_error
-                    else f"Extract command failed with return code {process.returncode}"
-                )
-                logger.error(error_msg)
-                progress_callback(0, f"Error: {error_msg}")
-                raise subprocess.CalledProcessError(
-                    process.returncode, cmd_args, error_msg
+            # The finally block guarantees the child is reaped even when
+            # this coroutine is cancelled mid-extract (e.g. during server
+            # shutdown). Without it, SIGTERM to the web server would leave
+            # an orphan ffmpeg / download running in the background.
+            try:
+                cli_error: Optional[Dict[str, Any]] = await self._consume_cli_events(
+                    process, progress_callback
                 )
 
-            final_path = await self._move_to_exports(output_filename)
-            await self._cleanup_intermediate_files(output_filename)
+                await process.wait()
 
-            return {
-                "operation": "extract",
-                "output_file": final_path,
-                "filename": Path(final_path).name,
-                "success": True,
-            }
+                if process.returncode != 0:
+                    error_msg = (
+                        cli_error["message"] if cli_error
+                        else f"Extract command failed with return code {process.returncode}"
+                    )
+                    logger.error(error_msg)
+                    progress_callback(0, f"Error: {error_msg}")
+                    raise subprocess.CalledProcessError(
+                        process.returncode, cmd_args, error_msg
+                    )
+
+                final_path = await self._move_to_exports(output_filename)
+                await self._cleanup_intermediate_files(output_filename)
+
+                return {
+                    "operation": "extract",
+                    "output_file": final_path,
+                    "filename": Path(final_path).name,
+                    "success": True,
+                }
+            finally:
+                await self._terminate_subprocess_if_alive(process)
 
         except Exception as e:
             error_type = type(e).__name__
@@ -141,16 +153,67 @@ class ExacqManService:
             progress_callback(0, f"Error: {str(e)}")
             raise
 
+    @staticmethod
+    async def _terminate_subprocess_if_alive(
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        """Make sure a CLI subprocess is dead before we release control.
+
+        Normal happy-path completion has ``returncode`` already set and this
+        is a no-op. The interesting case is when our coroutine is being
+        cancelled (server shutting down, request aborted) -- the child is
+        still running and would otherwise leak as an orphan ffmpeg /
+        downloader. We try SIGTERM first, give it a short grace window,
+        then escalate to SIGKILL.
+
+        Cleanup never raises: any failure to signal a process that's
+        already exited (``ProcessLookupError``) is treated as success.
+        """
+        if process.returncode is not None:
+            return
+
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return  # Child raced to exit on its own; nothing to do.
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3.0)
+            logger.info("CLI subprocess %s terminated cleanly on shutdown", process.pid)
+            return
+        except asyncio.TimeoutError:
+            logger.warning(
+                "CLI subprocess %s did not exit within 3s of SIGTERM; sending SIGKILL",
+                process.pid,
+            )
+
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        try:
+            await process.wait()
+        except Exception:  # pragma: no cover - defensive; wait() shouldn't raise here
+            pass
+
     async def _consume_cli_events(
         self,
         process: asyncio.subprocess.Process,
-        progress_callback: Callable[[int, str], None],
+        progress_callback: Callable[..., None],
     ) -> Optional[Dict[str, Any]]:
         """Read JSON events from the CLI subprocess and drive progress_callback.
 
         Returns the last `error` event payload (if any), so the caller can use
         its message when the subprocess exits non-zero. Non-JSON lines (e.g.
         Python tracebacks, stray prints) are logged and otherwise ignored.
+
+        The callback is invoked as
+        ``progress_callback(pct, message, rate_label=...)`` where
+        ``rate_label`` is an already-formatted string ("12.4 MB/s",
+        "140 FPS") for stages that have a meaningful rate, or ``None`` to
+        clear any stale rate from the previous stage. Each call is the
+        authoritative snapshot -- callers should write whatever they get
+        directly to their state object.
         """
         # `process.stdout` is typed Optional[StreamReader] because asyncio only
         # attaches a reader when stdout=PIPE. We always pass PIPE, so this is a
@@ -162,6 +225,11 @@ class ExacqManService:
         buffer = b""
         current_stage: Optional[str] = None
         last_error: Optional[Dict[str, Any]] = None
+
+        # Per-stage rate state: stage -> (prev_current, prev_ts, ema_rate).
+        # Reset implicitly when the stage advances (we only ever look up the
+        # active stage). Local to this call so each job starts clean.
+        rate_state: Dict[str, Tuple[int, float, Optional[float]]] = {}
 
         while True:
             chunk = await stdout.read(8192)
@@ -194,7 +262,9 @@ class ExacqManService:
                         current_stage, current_stage or "Working"
                     )
                     if low is not None:
-                        progress_callback(low, f"{message}…")
+                        # rate_label=None explicitly clears any rate left over
+                        # from the previous stage.
+                        progress_callback(low, f"{message}…", rate_label=None)
                 elif kind == "progress":
                     stage = event.get("stage") or current_stage
                     if stage != current_stage:
@@ -202,18 +272,27 @@ class ExacqManService:
                     rng = _STAGE_RANGES.get(stage)
                     total = event.get("total") or 0
                     current = event.get("current") or 0
+                    unit = event.get("unit") or ""
+                    ts = event.get("ts") or time.time()
+                    rate_label = self._compute_rate_label(
+                        rate_state, stage, unit, current, ts
+                    )
                     if rng and total > 0:
                         low, high = rng
                         ratio = max(0.0, min(1.0, current / total))
                         pct = int(round(low + (high - low) * ratio))
                         message = _STAGE_MESSAGES.get(stage, stage)
-                        progress_callback(pct, f"{message}… ({int(round(ratio * 100))}%)")
+                        progress_callback(
+                            pct,
+                            f"{message}… ({int(round(ratio * 100))}%)",
+                            rate_label=rate_label,
+                        )
                 elif kind == "done":
                     output = event.get("output")
                     msg = "Footage extraction completed successfully"
                     if output:
                         msg = f"{msg}: {Path(output).name}"
-                    progress_callback(100, msg)
+                    progress_callback(100, msg, rate_label=None)
                 elif kind == "error":
                     last_error = {
                         "type": event.get("type", "Error"),
@@ -229,6 +308,50 @@ class ExacqManService:
                     logger.warning("CLI warning: %s", event.get("message", ""))
 
         return last_error
+
+    @staticmethod
+    def _compute_rate_label(
+        rate_state: Dict[str, Tuple[int, float, Optional[float]]],
+        stage: Optional[str],
+        unit: str,
+        current: int,
+        ts: float,
+    ) -> Optional[str]:
+        """Update per-stage rate state and return a formatted label, or None.
+
+        Only the two rate-meaningful units are tracked:
+          * ``bytes`` -> formatted as ``"<x.x> MB/s"`` (decimal MB, matching
+            disk-throughput convention rather than tqdm's binary MiB).
+          * ``frames`` -> formatted as ``"<n> FPS"``.
+
+        Other units (percent, empty, etc.) return None. The first progress
+        event in a stage always returns None because we need two samples to
+        compute a delta. Subsequent samples are smoothed with an EMA so the
+        displayed value stays readable instead of jittering with every
+        200ms throttled update from the CLI.
+        """
+        if not stage or unit not in ("bytes", "frames"):
+            return None
+        prev = rate_state.get(stage)
+        if prev is None:
+            # First sample in this stage; seed and emit no rate yet.
+            rate_state[stage] = (current, ts, None)
+            return None
+        prev_current, prev_ts, prev_ema = prev
+        delta_current = current - prev_current
+        delta_ts = ts - prev_ts
+        if delta_ts <= 0 or delta_current < 0:
+            # Same instant or non-monotonic progress (rare, defensive).
+            return None
+        instant = delta_current / delta_ts
+        ema = instant if prev_ema is None else (
+            _RATE_SMOOTHING * instant + (1.0 - _RATE_SMOOTHING) * prev_ema
+        )
+        rate_state[stage] = (current, ts, ema)
+        if unit == "bytes":
+            return f"{ema / 1_000_000:.1f} MB/s"
+        # unit == "frames"
+        return f"{int(round(ema))} FPS"
 
     def _parse_event_line(self, line: str) -> Optional[Dict[str, Any]]:
         """Parse a single CLI output line as a JSON event.
@@ -271,6 +394,17 @@ class ExacqManService:
         server = self._sanitize_filename_component(request.server) if request.server else "unknown"
         camera = self._sanitize_filename_component(request.camera_alias)
         return f"{date_str}_{time_str}_{server}_{camera}_{request.timelapse_multiplier}x"
+
+    def planned_output_filename(self, request: ExtractRequest) -> str:
+        """
+        Public form of the output filename including extension.
+
+        The JobQueue calls this when picking up a job so the eventual
+        on-disk filename can be shown in the UI from the moment the job
+        starts processing -- well before the subprocess finishes and we
+        populate ``job.result.filename``.
+        """
+        return f"{self._generate_output_filename(request)}.mp4"
 
     @staticmethod
     def _sanitize_filename_component(value: str) -> str:

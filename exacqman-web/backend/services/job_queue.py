@@ -149,7 +149,8 @@ class JobQueue:
 
     def __init__(
         self,
-        run_extract: Callable[[ExtractRequest, Callable[[int, str], None]], Awaitable[dict]],
+        run_extract: Callable[[ExtractRequest, Callable[..., None]], Awaitable[dict]],
+        plan_filename: Optional[Callable[[ExtractRequest], str]] = None,
     ) -> None:
         """
         Args:
@@ -157,8 +158,14 @@ class JobQueue:
                 ``ExacqManService.extract_video_with_progress``. The queue
                 injects its own progress callback so updates land on the
                 shared ``Job`` instance.
+            plan_filename: Optional sync callable mirroring
+                ``ExacqManService.planned_output_filename``. When provided,
+                ``Job.filename`` is populated the moment the worker picks
+                up a job so the UI can show the planned output filename
+                in the job header during processing.
         """
         self._run_extract = run_extract
+        self._plan_filename = plan_filename
         self._waiting: Deque[Job] = deque()
         self._running: Optional[Job] = None
         self._terminal: List[Job] = []
@@ -301,12 +308,29 @@ class JobQueue:
         try:
             request = ExtractRequest(**job.request)
 
-            def progress_callback(progress: int, message: str) -> None:
+            # Surface the planned filename to the UI immediately. The
+            # frontend swaps "Just now" for this in the job header during
+            # processing so the user can see what's being produced even
+            # before the result lands.
+            if self._plan_filename is not None:
+                try:
+                    job.filename = self._plan_filename(request)
+                except Exception:  # pragma: no cover - filename is non-critical
+                    logger.exception("plan_filename failed; continuing without filename")
+
+            def progress_callback(
+                progress: int,
+                message: str,
+                rate_label: Optional[str] = None,
+            ) -> None:
                 # In-place mutation is intentional: the running Job object
                 # is the same one ``snapshot`` reads under the lock, so
-                # the next poll picks up these updates immediately.
+                # the next poll picks up these updates immediately. Every
+                # call is authoritative -- rate_label=None genuinely
+                # clears the previous label rather than leaving it stale.
                 job.progress = progress
                 job.message = message
+                job.rate_label = rate_label
 
             result: Any = await self._run_extract(request, progress_callback)
 
@@ -315,6 +339,7 @@ class JobQueue:
                 job.progress = 100
                 job.message = "Footage extraction completed successfully"
                 job.completed_at = datetime.now().isoformat()
+                job.rate_label = None
                 job.result = result if isinstance(result, dict) else {"value": result}
                 self._terminal.append(job)
                 self._running = None
@@ -329,6 +354,7 @@ class JobQueue:
                 job.status = JobStatusEnum.FAILED
                 job.message = FRIENDLY_FAILURE_MESSAGE
                 job.completed_at = datetime.now().isoformat()
+                job.rate_label = None
                 job.error = error_msg
                 job.log_available = log_written
                 self._terminal.append(job)
