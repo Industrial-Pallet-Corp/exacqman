@@ -142,6 +142,22 @@ class Job(BaseModel):
     request: Dict[str, Any] = Field(..., description="Original extraction request (for display)")
     result: Optional[Dict[str, Any]] = Field(None, description="Job result data on success")
     error: Optional[str] = Field(None, description="Raw error detail on failure (technical; not user-facing)")
+    filename: Optional[str] = Field(
+        None,
+        description=(
+            "Planned/final output filename with extension (e.g. 'my-clip.mp4'). "
+            "Set as soon as the worker picks up the job so the UI can show it "
+            "in the job card header during processing."
+        ),
+    )
+    rate_label: Optional[str] = Field(
+        None,
+        description=(
+            "Live data-rate label for the active stage (e.g. '12.4 MB/s' for "
+            "downloading, '140 FPS' for timelapsing). Null when the current "
+            "stage doesn't have a meaningful rate."
+        ),
+    )
     log_available: bool = Field(
         False,
         description=(

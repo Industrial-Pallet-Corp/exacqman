@@ -355,6 +355,52 @@ label {
     text-transform: uppercase;
 }
 
+/* Lays out the stage/percentage line (e.g. "Timelapsing footage… (25%)")
+ * with the live rate label right-aligned beside it, directly under the
+ * PROCESSING badge. Keeping them on a single row prevents the rate from
+ * pushing the progress bar down a line. align-items: baseline so the
+ * two differently-sized fonts share a clean text baseline.
+ */
+.job-message-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--spacing-2);
+}
+
+.job-message-row .job-message {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.job-rate {
+    flex: 0 0 auto;
+    /* Right-justify the rate so its text's right edge lines up with the
+     * status badge's text right edge above it. The badge's box ends flush
+     * with the card's content edge and has its own padding-right of
+     * var(--spacing-2); the rate's box also ends flush with the card's
+     * content edge, so it needs the same padding-right to vertically
+     * align the two text right-edges. */
+    padding-right: var(--spacing-2);
+    font-size: var(--font-size-xs);
+    font-weight: 500;
+    color: var(--primary-color);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+/* Header label used for any job whose planned/produced filename is known
+ * (processing, completed, failed). Bare filename, no "FILE:" prefix --
+ * rendered at `font-size-sm` and bold so it reads as the primary
+ * identifier of the card, distinct from the lighter metadata row
+ * beneath (Camera / Speed / Duration in `font-size-xs` + gray-600).
+ */
+.job-header-filename {
+    font-size: var(--font-size-sm);
+    color: var(--gray-800);
+    font-weight: 700;
+}
+
 .job-actions {
     display: flex;
     gap: var(--spacing-2);
@@ -428,33 +474,17 @@ label {
     color: var(--gray-600);
 }
 
-.job-status {
-    padding: var(--spacing-1) var(--spacing-2);
-    border-radius: var(--radius-sm);
-    font-size: var(--font-size-xs);
-    font-weight: 500;
-    text-transform: uppercase;
-}
-
-.job-status.queued {
-    background-color: var(--gray-200);
-    color: var(--gray-700);
-}
-
-.job-status.processing {
-    background-color: var(--info-color);
-    color: white;
-}
-
-.job-status.completed {
-    background-color: var(--success-color);
-    color: white;
-}
-
-.job-status.failed {
-    background-color: var(--error-color);
-    color: white;
-}
+/* The earlier `.job-status { padding ... }` and `.job-status.<state> {
+ * background-color ... }` block has been removed. It was leftover from
+ * when `.job-status` itself was the badge; today `.job-status` is the
+ * right-side container of the header (a flex wrapper for the badge plus
+ * any action buttons), and the badge is `.job-status-badge`. The legacy
+ * padding was pushing the badge an extra `spacing-2` to the left of the
+ * card edge, breaking right-alignment with `.job-rate` below it. The
+ * state-variant rules required both `.job-status` and a state class on
+ * the same element, which our markup never produces, so they were inert
+ * dead code.
+ */
 
 .job-progress {
     width: 100%;
@@ -984,7 +1014,7 @@ label {
     100% { transform: rotate(360deg); }
 }
 
-/* Confirmation Modal (in-app replacement for window.confirm) */
+/* Confirmation Modal */
 .confirm-modal {
     position: fixed;
     inset: 0;

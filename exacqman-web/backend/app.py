@@ -83,9 +83,21 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup on application shutdown."""
+    """Cleanup on application shutdown.
+
+    Bounded so a wedged worker can never block the FastAPI lifespan from
+    completing -- uvicorn waits for this to return before it releases the
+    port, so taking longer than a few seconds here is the difference
+    between "kill -TERM and it's gone" and "kill -TERM and you wait".
+    """
     logger.info("Shutting down ExacqMan Web Server...")
-    await job_queue.stop()
+    try:
+        await asyncio.wait_for(job_queue.stop(), timeout=8.0)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "JobQueue.stop() did not complete within 8s; proceeding with shutdown anyway"
+        )
+    logger.info("ExacqMan Web Server shut down")
 
 @app.get("/")
 async def root():
