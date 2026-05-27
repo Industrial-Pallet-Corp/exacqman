@@ -10,9 +10,8 @@ import logging
 import os
 import shutil
 import signal
-import time
 from pathlib import Path
-from typing import Dict, Any, Callable, NamedTuple, Optional, Tuple
+from typing import Dict, Any, Callable, NamedTuple, Optional
 
 from api.models import ExtractRequest
 from exacqman_naming import default_output_stem, sanitize_filename_component
@@ -39,11 +38,6 @@ _STAGE_MESSAGES = {
     "timelapsing":     "Timelapsing footage",
     "compression":     "Compressing video",
 }
-
-# EMA smoothing factor for the live rate label. tqdm uses 0.3 as its default
-# for the same purpose; the higher the value, the more responsive but jumpier.
-_RATE_SMOOTHING = 0.3
-
 
 class _CliRunResult(NamedTuple):
     """Structured outcome of consuming the CLI's JSON event stream.
@@ -447,11 +441,6 @@ class ExacqManService:
         # rather than by glob.
         done_output: Optional[str] = None
 
-        # Per-stage rate state: stage -> (prev_current, prev_ts, ema_rate).
-        # Reset implicitly when the stage advances (we only ever look up the
-        # active stage). Local to this call so each job starts clean.
-        rate_state: Dict[str, Tuple[int, float, Optional[float]]] = {}
-
         while True:
             chunk = await stdout.read(8192)
             if not chunk:
@@ -493,11 +482,13 @@ class ExacqManService:
                     rng = _STAGE_RANGES.get(stage)
                     total = event.get("total") or 0
                     current = event.get("current") or 0
-                    unit = event.get("unit") or ""
-                    ts = event.get("ts") or time.time()
-                    rate_label = self._compute_rate_label(
-                        rate_state, stage, unit, current, ts
-                    )
+                    # ``rate_label`` is computed at the source (by
+                    # ``progress.JsonReporter._compute_rate_label``) and
+                    # may be absent on the first sample of a stage or on
+                    # non-rate units like ``percent``. The web service is
+                    # a pure renderer here -- whatever the CLI sends is
+                    # what we surface.
+                    rate_label = event.get("rate_label")
                     if rng and total > 0:
                         low, high = rng
                         ratio = max(0.0, min(1.0, current / total))
@@ -534,50 +525,6 @@ class ExacqManService:
                     logger.warning("CLI warning: %s", event.get("message", ""))
 
         return _CliRunResult(output_path=done_output, error=last_error)
-
-    @staticmethod
-    def _compute_rate_label(
-        rate_state: Dict[str, Tuple[int, float, Optional[float]]],
-        stage: Optional[str],
-        unit: str,
-        current: int,
-        ts: float,
-    ) -> Optional[str]:
-        """Update per-stage rate state and return a formatted label, or None.
-
-        Only the two rate-meaningful units are tracked:
-          * ``bytes`` -> formatted as ``"<x.x> MB/s"`` (decimal MB, matching
-            disk-throughput convention rather than tqdm's binary MiB).
-          * ``frames`` -> formatted as ``"<n> FPS"``.
-
-        Other units (percent, empty, etc.) return None. The first progress
-        event in a stage always returns None because we need two samples to
-        compute a delta. Subsequent samples are smoothed with an EMA so the
-        displayed value stays readable instead of jittering with every
-        200ms throttled update from the CLI.
-        """
-        if not stage or unit not in ("bytes", "frames"):
-            return None
-        prev = rate_state.get(stage)
-        if prev is None:
-            # First sample in this stage; seed and emit no rate yet.
-            rate_state[stage] = (current, ts, None)
-            return None
-        prev_current, prev_ts, prev_ema = prev
-        delta_current = current - prev_current
-        delta_ts = ts - prev_ts
-        if delta_ts <= 0 or delta_current < 0:
-            # Same instant or non-monotonic progress (rare, defensive).
-            return None
-        instant = delta_current / delta_ts
-        ema = instant if prev_ema is None else (
-            _RATE_SMOOTHING * instant + (1.0 - _RATE_SMOOTHING) * prev_ema
-        )
-        rate_state[stage] = (current, ts, ema)
-        if unit == "bytes":
-            return f"{ema / 1_000_000:.1f} MB/s"
-        # unit == "frames"
-        return f"{int(round(ema))} FPS"
 
     def _parse_event_line(self, line: str) -> Optional[Dict[str, Any]]:
         """Parse a single CLI output line as a JSON event.
