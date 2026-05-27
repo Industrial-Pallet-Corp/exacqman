@@ -10,7 +10,6 @@ import logging
 import os
 import shutil
 import signal
-import subprocess
 import time
 from pathlib import Path
 from typing import Dict, Any, Callable, NamedTuple, Optional, Tuple
@@ -61,6 +60,65 @@ class _CliRunResult(NamedTuple):
     """
     output_path: Optional[str]
     error: Optional[Dict[str, Any]]
+
+
+class ExtractFailure(Exception):
+    """A CLI extract job that ended in an error we can categorize.
+
+    ``extract_video_with_progress`` raises this whenever the subprocess
+    exits non-zero. ``error_type`` is the structured type the CLI
+    emitted via its ``error`` event (e.g. ``"ConfigError"``,
+    ``"ExacqvisionError"``), or ``"InternalError"`` for the synthesized
+    case where the subprocess exited non-zero without emitting any
+    ``error`` event at all. ``error_message`` is the CLI's detailed
+    string and is what ends up in ``job.error`` / the per-job log.
+
+    ``friendly_message`` is the *user-facing* string -- the one we
+    surface in the UI as ``job.message``. It's derived from
+    ``error_type`` via ``_CATEGORIES`` so all the user-visible text
+    lives in one place. Unrecognized types fall through to
+    ``DEFAULT_FRIENDLY_MESSAGE`` ("internal error"), which is also the
+    string ``_run_job`` uses for any non-CLI failure (web-side spawn
+    errors, contract violations, etc.) -- a single, unsurprising
+    "something else went wrong" bucket.
+
+    Notes on the bucket choices:
+      * `server` here means *the camera server* (the exacqvision
+        device), not our backend. The previous generic
+        "server error" wording conflated those; the new mapping
+        reserves "the camera server" for ExacqvisionError and uses
+        "internal error" for our-backend issues.
+      * Caption-too-long lives in `configuration` (it's bad input,
+        from the same family as a malformed config / credentials
+        file) -- in practice the web UI blocks this at form level
+        so the bucket exists mainly to handle direct CLI / API
+        callers.
+    """
+
+    DEFAULT_FRIENDLY_MESSAGE = "Video extraction failed: internal error"
+
+    _CATEGORIES = {
+        # configuration bucket -- something the user can fix by
+        # adjusting their config / credentials / request inputs.
+        "ConfigError":      "Video extraction failed: configuration problem",
+        "CredentialsError": "Video extraction failed: configuration problem",
+        "CaptionTooLong":   "Video extraction failed: configuration problem",
+        # server bucket -- the camera (exacqvision) server itself.
+        "ExacqvisionError": "Video extraction failed: couldn't reach the camera server",
+        # processing bucket -- local video decode / transform failure.
+        "VideoOpenError":   "Video extraction failed: video processing error",
+    }
+
+    def __init__(self, error_type: str, message: str):
+        self.error_type = error_type
+        self.error_message = message
+        self.friendly_message = self._CATEGORIES.get(
+            error_type, self.DEFAULT_FRIENDLY_MESSAGE
+        )
+        # Make str(exc) carry the unambiguous "<type>: <message>" form so
+        # backend logs and the per-job log snippet keep their existing
+        # readability; the user-facing summary is `friendly_message`.
+        super().__init__(f"{error_type}: {message}")
 
 
 class ExacqManService:
@@ -151,15 +209,28 @@ class ExacqManService:
                 await process.wait()
 
                 if process.returncode != 0:
-                    error_msg = (
-                        cli_result.error["message"] if cli_result.error
-                        else f"Extract command failed with return code {process.returncode}"
-                    )
-                    logger.error(error_msg)
+                    # Two sub-cases:
+                    #   1. CLI emitted a structured `error` event -- use
+                    #      its type + message so the friendly mapping
+                    #      lands in the right bucket (configuration /
+                    #      server / processing).
+                    #   2. CLI exited non-zero without any `error` event
+                    #      (killed by signal, crashed before reaching
+                    #      the reporter, ...). Synthesize an
+                    #      `InternalError` so the mapping falls through
+                    #      to the "internal error" bucket.
+                    if cli_result.error:
+                        error_type = cli_result.error["type"]
+                        error_msg = cli_result.error["message"]
+                    else:
+                        error_type = "InternalError"
+                        error_msg = (
+                            f"Extract command failed with return code "
+                            f"{process.returncode}"
+                        )
+                    logger.error("CLI failure %s: %s", error_type, error_msg)
                     progress_callback(0, f"Error: {error_msg}")
-                    raise subprocess.CalledProcessError(
-                        process.returncode, cmd_args, error_msg
-                    )
+                    raise ExtractFailure(error_type, error_msg)
 
                 # The CLI exited successfully; we now trust its
                 # ``done.output`` event as the authoritative location of

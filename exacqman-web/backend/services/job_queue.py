@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, List, Optional
 
 from api.models import ExtractRequest, Job, JobStatusEnum, JobsSnapshot
+from services.exacqman_service import ExtractFailure
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +58,17 @@ job-specific files use the ``{job_id}.log`` convention (UUID stems) so they
 remain unambiguous next to anything else that lands here. Currently kept
 indefinitely -- cleanup is a separate maintenance concern."""
 
-FRIENDLY_FAILURE_MESSAGE = "Video extraction failed: server error"
-"""User-facing message attached to a failed Job. The verbose / technical
-detail lives in the per-job log file accessible via /api/jobs/{id}/log."""
+# The user-facing failure message lives on `ExtractFailure` in
+# ``services.exacqman_service``:
+#   * For CLI-originated failures with a recognised structured type
+#     (ConfigError, ExacqvisionError, ...) -- ``exc.friendly_message``
+#     drops the failure into the right bucket
+#     (configuration / server / processing).
+#   * For everything else (web-side spawn errors, contract violations,
+#     unrecognised CLI types) -- ``ExtractFailure.DEFAULT_FRIENDLY_MESSAGE``
+#     is the catch-all "internal error" bucket.
+# The verbose / technical detail still lives in the per-job log file
+# accessible via /api/jobs/{id}/log.
 
 _CAPTURED_LOGGER_NAMES = ("services", "api")
 """Logger namespaces whose records are folded into the per-job log capture.
@@ -344,22 +353,46 @@ class JobQueue:
                 self._terminal.append(job)
                 self._running = None
             logger.info(f"Job {job.id} completed")
-        except Exception as exc:
-            # User-facing message stays terse and generic; the verbose
-            # CalledProcessError repr / traceback / per-stage records all
-            # live in the downloadable log snippet instead.
+        except ExtractFailure as exc:
+            # CLI-originated failure with a structured type. The
+            # category-specific friendly message (configuration /
+            # server / processing / internal) is precomputed on the
+            # exception via ``ExtractFailure._CATEGORIES``; surface it
+            # directly. The verbose technical detail still lives in the
+            # downloadable per-job log snippet.
             error_msg = str(exc)
             log_written = _write_job_log(job.id, log_handler, exc)
             async with self._lock:
                 job.status = JobStatusEnum.FAILED
-                job.message = FRIENDLY_FAILURE_MESSAGE
+                job.message = exc.friendly_message
                 job.completed_at = datetime.now().isoformat()
                 job.rate_label = None
                 job.error = error_msg
                 job.log_available = log_written
                 self._terminal.append(job)
                 self._running = None
-            logger.error(f"Job {job.id} failed: {error_msg}")
+            logger.error(
+                "Job %s failed (%s): %s",
+                job.id, exc.error_type, error_msg,
+            )
+        except Exception as exc:
+            # Everything else: web-side spawn errors, the cli-2
+            # "no done.output" contract violation, an OSError between
+            # process events, ... -- all bucket as "internal error"
+            # since they don't have a CLI-side structured type to
+            # categorize.
+            error_msg = str(exc)
+            log_written = _write_job_log(job.id, log_handler, exc)
+            async with self._lock:
+                job.status = JobStatusEnum.FAILED
+                job.message = ExtractFailure.DEFAULT_FRIENDLY_MESSAGE
+                job.completed_at = datetime.now().isoformat()
+                job.rate_label = None
+                job.error = error_msg
+                job.log_available = log_written
+                self._terminal.append(job)
+                self._running = None
+            logger.error(f"Job {job.id} failed (uncategorized): {error_msg}")
         finally:
             _detach_log_capture(log_handler)
 
