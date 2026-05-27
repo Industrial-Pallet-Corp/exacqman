@@ -5,15 +5,39 @@ Handles file operations for processed videos in the ExacqMan web application.
 """
 
 import os
+import json
 import shutil
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
 from api.models import FileInfo
 
+try:
+    from mutagen.mp4 import MP4, MP4StreamInfoError
+    _MUTAGEN_AVAILABLE = True
+except ImportError:
+    # Mutagen is the canonical reader for the JSON metadata blob the CLI
+    # embeds in the mp4 `comment` tag. If it's not installed (e.g. older
+    # checkouts of the backend that pre-date the dependency add), we
+    # fall back to filename-based parsing so the file list still works
+    # -- just without the "rename-config-survives" guarantee.
+    MP4 = None  # type: ignore[assignment]
+    MP4StreamInfoError = Exception  # type: ignore[misc,assignment]
+    _MUTAGEN_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+# Module-level cache keyed by `(path, mtime)`: stat'ing every file in the
+# exports directory on every /api/files call is cheap, but parsing the
+# mp4 container atoms is not (and gets repeated unchanged across polls).
+# Using mtime in the key means the cache invalidates automatically when
+# a file is rewritten in place (which the CLI's atomic-replace pattern
+# preserves). Bounded implicitly by MAX_EXPORT_FILES (=25) so we don't
+# need an LRU eviction policy here.
+_EmbeddedMetadata = Dict[str, Any]
+_metadata_cache: Dict[str, Tuple[float, _EmbeddedMetadata]] = {}
 
 class FileService:
     """Service for handling processed video files."""
@@ -161,10 +185,28 @@ class FileService:
         """
         try:
             stat = file_path.stat()
-            
-            # Try to extract metadata from filename
-            camera_alias, timelapse_multiplier = self._parse_filename_metadata(file_path.name)
-            
+
+            # Prefer metadata embedded in the mp4 container by the CLI: it
+            # survives any config-file rotation or rename, and works for
+            # files whose user-supplied `-o` filename doesn't follow the
+            # canonical `{date}_{server}_{camera}_{multiplier}x` convention.
+            # The filename parser is kept as a fallback so legacy files
+            # (recorded before metadata embedding existed) still surface
+            # camera + multiplier on the file list.
+            embedded = self._read_embedded_metadata(file_path, stat.st_mtime)
+            camera_alias = embedded.get("camera_alias")
+            multiplier_raw = embedded.get("multiplier")
+            timelapse_multiplier: Optional[int] = None
+            if multiplier_raw is not None:
+                try:
+                    timelapse_multiplier = int(multiplier_raw)
+                except (TypeError, ValueError):
+                    timelapse_multiplier = None
+
+            if camera_alias is None and timelapse_multiplier is None:
+                # Legacy fallback: parse the filename.
+                camera_alias, timelapse_multiplier = self._parse_filename_metadata(file_path.name)
+
             return FileInfo(
                 filename=file_path.name,
                 path=str(file_path),
@@ -188,7 +230,65 @@ class FileService:
                 camera_alias=None,
                 timelapse_multiplier=None
             )
-    
+
+    def _read_embedded_metadata(self, file_path: Path, mtime: float) -> _EmbeddedMetadata:
+        """Read the JSON metadata blob embedded in an mp4's ``comment`` tag.
+
+        The CLI embeds a versioned JSON payload (see
+        ``EXACQMAN_METADATA_VERSION`` in ``exacqman.py``) carrying
+        provenance: server, camera_alias, camera_id, multiplier,
+        start/end ISO datetimes, timezone, and caption. That blob is the
+        authoritative source for the file-browser's metadata columns;
+        filename parsing is purely a backward-compat fallback.
+
+        Cached by ``(path, mtime)`` so repeated polls of ``/api/files``
+        don't re-parse the container on every call. The cache entry
+        invalidates automatically the moment a file is rewritten.
+
+        Returns an empty dict for any failure mode (mutagen missing,
+        non-mp4 input, container parse error, malformed JSON, etc.) so
+        callers can treat it as "no metadata available" without special
+        branching.
+        """
+        if not _MUTAGEN_AVAILABLE:
+            return {}
+        if file_path.suffix.lower() != ".mp4":
+            return {}
+
+        cache_key = str(file_path)
+        cached = _metadata_cache.get(cache_key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+
+        result: _EmbeddedMetadata = {}
+        try:
+            mp4 = MP4(str(file_path))
+            # The mp4 `comment` tag is stored under the iTunes-style
+            # 4-char atom name `\xa9cmt`. Mutagen exposes it as a list
+            # (multi-value atoms are legal in the spec); the CLI only
+            # ever writes a single string, so we take the first entry.
+            tags = mp4.tags or {}
+            comment_values = tags.get("\xa9cmt") or []
+            if comment_values:
+                raw = comment_values[0]
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    result = payload
+        except (MP4StreamInfoError, OSError, ValueError, json.JSONDecodeError) as exc:
+            # MP4StreamInfoError: not a valid mp4 / missing moov atom.
+            # OSError: permissions, vanished file, etc.
+            # ValueError / JSONDecodeError: malformed payload from an
+            # older or hand-edited file. None of these are fatal: we
+            # log at debug (not warning) so the file list endpoint
+            # stays quiet for the common "legacy file, no metadata"
+            # case.
+            logger.debug(f"No embedded metadata for {file_path.name}: {exc}")
+
+        _metadata_cache[cache_key] = (mtime, result)
+        return result
+
     def _parse_filename_metadata(self, filename: str) -> tuple[Optional[str], Optional[int]]:
         """
         Parse camera alias and timelapse multiplier from filename.

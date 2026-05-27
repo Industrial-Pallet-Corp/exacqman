@@ -318,6 +318,85 @@ If the pipeline fails partway, no rename or cleanup happens. The
 intermediates remain in `DIR/` for inspection. Callers retrying with the
 same `--output-name` will simply overwrite them on the next run.
 
+### Output File Metadata
+
+In addition to the deliverable mp4, the extract pipeline embeds a
+JSON-encoded provenance blob directly into the file's MP4 container, so
+the metadata travels with the file wherever it goes. This is what makes
+the web UI's "Camera" column resolve correctly even if the source
+`.config` is later renamed or rewritten -- and it works regardless of
+what filename the user picked via `-o`.
+
+The embed is a no-re-encode `ffmpeg -codec copy` pass, run as the final
+step of the extract pipeline (after `--output-dir` finalization). On
+any ffmpeg failure the helper logs a warning via the reporter and leaves
+the file untouched: the deliverable is the contract, the metadata is a
+bonus.
+
+**Where it lives.** The blob is stored in the standard MP4 `comment`
+atom (`\xa9cmt`). The standard `title` atom (`\xa9nam`) is also set to
+the file stem as a convenience for generic media players; it carries
+no structured meaning and is not part of the contract.
+
+**Reading it.** Any mp4 metadata tool will surface it:
+
+```bash
+# ffprobe (bundled with ffmpeg)
+ffprobe -v error -show_format -of json file.mp4 \
+    | jq -r '.format.tags.comment' | jq .
+
+# mediainfo
+mediainfo --Output=JSON file.mp4 | jq -r '.media.track[0].Comment' | jq .
+```
+
+```python
+# mutagen (the backend uses this -- see backend/services/file_service.py)
+from mutagen.mp4 import MP4
+import json
+mp4 = MP4("file.mp4")
+payload = json.loads(mp4.tags["\xa9cmt"][0])
+```
+
+**Schema.** The blob is a single JSON object. Field shape and presence:
+
+| Field                          | Type    | Required | Description |
+|---|---|---|---|
+| `exacqman_metadata_version`    | int     | yes      | Schema version (currently `1`). Bumped on incompatible changes; additive changes do not bump. |
+| `server`                       | string  | yes      | Server alias from the config file (e.g. `"gpa"`) |
+| `camera_alias`                 | string  | yes      | Camera alias from the config file (e.g. `"dock-6"`) |
+| `camera_id`                    | int     | yes      | Exacqvision camera ID (stable across config renames) |
+| `multiplier`                   | int     | yes      | Timelapse multiplier (e.g. `50` for 50x) |
+| `start_iso`                    | string  | yes      | ISO 8601 start datetime, with timezone offset |
+| `end_iso`                      | string  | yes      | ISO 8601 end datetime, with timezone offset |
+| `timezone`                     | string  | yes      | IANA timezone name (e.g. `"America/Indiana/Indianapolis"`) |
+| `caption`                      | string  | no       | User-supplied caption. Omitted from the payload when empty. |
+
+Example payload (formatted -- the on-disk form is minified, no whitespace):
+
+```json
+{
+  "exacqman_metadata_version": 1,
+  "server": "gpa",
+  "camera_alias": "dock-6",
+  "camera_id": 12345,
+  "multiplier": 50,
+  "start_iso": "2026-05-27T09:30:00-04:00",
+  "end_iso": "2026-05-27T09:45:00-04:00",
+  "timezone": "America/Indiana/Indianapolis",
+  "caption": "Hello world"
+}
+```
+
+Empty-string / `None` values are dropped before encoding, so readers
+should treat missing keys as "unset" rather than as a schema violation.
+
+**Legacy files.** Files written before this contract existed have no
+`comment` tag at all. The backend treats that as "no embedded
+metadata" and silently falls back to parsing the canonical filename
+convention (`{date}_{time}_{server}_{camera}_{multiplier}x.mp4`); files
+that match neither will surface as "Unknown" in the file browser
+until they are re-extracted.
+
 ### Exit Codes
 
 | Code  | Meaning |
@@ -337,7 +416,13 @@ Anything documented above is part of the contract; everything else
 wording of `info` / `warning` messages, intermediate filenames in
 human-mode) is implementation detail and can change without notice.
 
-Adding a new stage, event field, or error type is backwards-compatible
-as long as existing consumers gracefully ignore unknown fields and treat
-unknown stages as informational. Removing or renaming anything in the
-table above is a breaking change.
+Adding a new stage, event field, error type, or output-metadata field
+is backwards-compatible as long as existing consumers gracefully ignore
+unknown fields and treat unknown stages as informational. Removing or
+renaming anything in the tables above is a breaking change.
+
+The embedded-metadata schema (`Output File Metadata`) is independently
+versioned by `exacqman_metadata_version`. Additive changes (new
+optional keys) do not bump the version; incompatible changes (key
+removal, type change, semantic redefinition) bump it, and readers
+should treat any version newer than they understand as best-effort.

@@ -9,8 +9,13 @@ from exacqman_naming import default_output_stem
 from progress import init_reporter, get_reporter
 import argparse
 import cv2
+import json
+import os
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -945,6 +950,137 @@ def parse_arguments():
     return arg_parser.parse_args()
 
 
+EXACQMAN_METADATA_VERSION = 1
+# Schema version for the JSON payload stored in the mp4 `comment` tag.
+# Bump when the on-disk shape changes in a way that downstream readers
+# (e.g. exacqman-web's FileService) must be aware of. Readers should
+# accept any version <= the latest they understand; missing keys are
+# fine, extra keys are fine, version mismatches should be logged and
+# the payload treated as best-effort.
+
+
+def _locate_ffmpeg() -> Optional[str]:
+    """Locate the ffmpeg executable, preferring the same binary MoviePy uses.
+
+    MoviePy resolves ffmpeg via, in order:
+      1. The ``FFMPEG_BINARY`` env var (if set to anything but the sentinel
+         ``"ffmpeg-imageio"``).
+      2. The binary bundled with ``imageio-ffmpeg`` (always installed as a
+         transitive dep).
+      3. A system ``ffmpeg`` on ``PATH`` (last resort).
+
+    Mirroring that order here means we embed metadata with the same binary
+    that just compressed the file, avoiding "works in moviepy, breaks in
+    metadata-write" version-skew surprises.
+
+    Returns:
+        Absolute path to an ffmpeg binary, or ``None`` if none can be found.
+    """
+    env_binary = os.environ.get("FFMPEG_BINARY")
+    if env_binary and env_binary != "ffmpeg-imageio":
+        return env_binary
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    return shutil.which("ffmpeg")
+
+
+def _embed_extract_metadata(file_path: Path, metadata: Dict[str, Any]) -> None:
+    """Embed exacqman extract metadata into an mp4 in place.
+
+    Writes a JSON-encoded blob (schema versioned via
+    ``EXACQMAN_METADATA_VERSION``) into the mp4 container's ``comment``
+    tag using a no-re-encode ffmpeg pass (``-codec copy``), so the operation
+    is fast and lossless. We also set the standard ``title`` tag to the
+    file stem so generic media players surface a recognisable name.
+
+    The point of this is provenance: long after the config file rotates
+    or the camera gets renamed, the file still knows what it is. The
+    web's FileService reads this back to populate the file-browser's
+    camera column, replacing the brittle filename-parsing path that
+    failed for any custom ``-o`` filename.
+
+    Failures here never raise: if ffmpeg isn't locatable, the metadata
+    write fails, or the rename races, we log a warning via the reporter
+    and leave the original file untouched. The compressed video is the
+    user-facing deliverable; metadata is a bonus, not a precondition.
+
+    Args:
+        file_path: Path to the final compressed mp4 to tag in place.
+        metadata: Dict of payload fields; serialised verbatim into JSON.
+                  Keys with ``None`` / empty-string values are dropped so
+                  optional fields (e.g. ``caption``) don't muddy the blob.
+    """
+    reporter = get_reporter()
+    ffmpeg_bin = _locate_ffmpeg()
+    if not ffmpeg_bin:
+        reporter.warning(
+            "ffmpeg binary not found; skipping metadata embed "
+            f"for {file_path.name}"
+        )
+        return
+
+    payload = {
+        "exacqman_metadata_version": EXACQMAN_METADATA_VERSION,
+    }
+    for key, value in metadata.items():
+        if value is None or value == "":
+            continue
+        payload[key] = value
+    json_blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+
+    # Write to a sibling temp file then atomically swap. Writing in place
+    # isn't supported by ffmpeg (it would truncate the input mid-read);
+    # the temp + replace pattern handles that and gives us a clean rollback
+    # path on failure. Keep the `.mp4` suffix on the temp name so ffmpeg
+    # can infer the output muxer from the extension (using `.tmp` makes
+    # ffmpeg refuse with "Unable to choose an output format"); `-f mp4`
+    # is set explicitly too for belt-and-suspenders.
+    tmp_path = file_path.with_name(file_path.stem + ".tagging.mp4")
+    args = [
+        ffmpeg_bin,
+        "-y",                       # overwrite tmp if it exists
+        "-loglevel", "error",       # silence the per-frame chatter; surface real errors
+        "-i", str(file_path),
+        "-map", "0",                # carry every stream over (video, audio if any)
+        "-codec", "copy",           # no re-encode -- pure container rewrite
+        "-f", "mp4",                # force the output muxer regardless of temp name
+        "-metadata", f"comment={json_blob}",
+        "-metadata", f"title={file_path.stem}",
+        str(tmp_path),
+    ]
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            reporter.warning(
+                f"ffmpeg metadata embed failed for {file_path.name} "
+                f"(exit {result.returncode}): {result.stderr.strip()}"
+            )
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            return
+        tmp_path.replace(file_path)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        reporter.warning(
+            f"Failed to embed metadata in {file_path.name}: {exc}"
+        )
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
 def _finalize_extract_output_dir(
     output_dir: Path,
     output_stem: str,
@@ -1289,6 +1425,27 @@ def main():
                     multiplier=settings.timelapse_multiplier,
                     compressed_path=Path(final_path),
                 )
+
+            # Embed provenance metadata into the final mp4 so the camera
+            # alias, server, time range, multiplier, and caption travel
+            # with the file even if the config file is later renamed or
+            # rewritten. The web service reads this back to populate the
+            # file-browser's "Camera" column, replacing the brittle
+            # filename-parsing fallback. Done as a final step, AFTER any
+            # rename, so the metadata lands in the user-facing file.
+            _embed_extract_metadata(
+                Path(final_path),
+                {
+                    "server": settings.server,
+                    "camera_alias": settings.camera_alias,
+                    "camera_id": settings.camera_id,
+                    "multiplier": settings.timelapse_multiplier,
+                    "start_iso": start.isoformat(),
+                    "end_iso": end.isoformat(),
+                    "timezone": settings.timezone,
+                    "caption": settings.caption,
+                },
+            )
 
             reporter.done(output=final_path)
 

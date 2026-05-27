@@ -13,5 +13,8 @@ pydantic==2.10.0
 # Additional utilities
 python-dotenv==1.0.1
 
+# MP4 metadata reading (provenance tags embedded in exported files by the CLI)
+mutagen==1.47.0
+
 # Note: CORS middleware is built into FastAPI, no additional package needed
 # All other imports (asyncio, subprocess, os, logging, pathlib, shutil, uuid, datetime, json, typing) are part of Python standard library
