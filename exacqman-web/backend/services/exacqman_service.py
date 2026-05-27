@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import signal
 from pathlib import Path
 from typing import Dict, Any, Callable, NamedTuple, Optional
@@ -138,6 +137,9 @@ class ExacqManService:
         cmd_args = []
         try:
             output_filename = self._generate_output_filename(request)
+            exports_dir = (
+                self.working_directory / "exacqman-web" / "exports"
+            ).resolve()
 
             # Build command arguments. We use flag forms exclusively (except for
             # the leading `camera_alias` positional) so the call is unambiguous
@@ -154,6 +156,13 @@ class ExacqManService:
             #     round-trip and no year/day fixup heuristics on the CLI
             #     side. The "iso" prefix on the flag name makes the
             #     expected format obvious at the call site.
+            #   * `--output-dir` so the CLI delivers the final file
+            #     directly into `exports/` and cleans up its own
+            #     intermediates. Eliminates the post-pipeline move +
+            #     intermediate-cleanup work the web service used to do
+            #     (`_move_to_exports` / `_cleanup_intermediate_files`),
+            #     and -- crucially -- removes the only path by which a
+            #     web-side bug could touch files outside `exports/`.
             #
             # -u runs Python unbuffered so events stream in real time.
             # --progress-format=json makes the CLI emit one JSON event per line.
@@ -168,6 +177,7 @@ class ExacqManService:
                 "--multiplier", str(request.timelapse_multiplier),
                 "-c",  # Enable cropping to apply crop_dimensions and font_weight settings
                 "-o", output_filename,
+                "--output-dir", str(exports_dir),
             ]
 
             if request.server:
@@ -246,14 +256,16 @@ class ExacqManService:
                         "This is a CLI integration regression."
                     )
 
-                # The CLI's path may be absolute or relative to its cwd
-                # (our `working_directory`). `Path.resolve()` against the
-                # cwd handles both cases.
-                source_path = (self.working_directory / cli_result.output_path).resolve()
-                dest_filename = f"{output_filename}.mp4"
-                final_path = await self._move_to_exports(source_path, dest_filename)
-                await self._cleanup_intermediate_files(
-                    output_filename, request.timelapse_multiplier
+                # With `--output-dir` set, the CLI delivers the final
+                # file directly into `exports/` (renamed to the bare
+                # stem with no codec suffix, intermediates already
+                # removed by `_finalize_extract_output_dir` in the
+                # CLI). `done.output` is therefore already the
+                # canonical artifact path; we just resolve it (it may
+                # be absolute or relative to the CLI's cwd) and pass
+                # it through.
+                final_path = str(
+                    (self.working_directory / cli_result.output_path).resolve()
                 )
 
                 return {
@@ -590,115 +602,6 @@ class ExacqManService:
         populate ``job.result.filename``.
         """
         return f"{self._generate_output_filename(request)}.mp4"
-
-
-    async def _cleanup_intermediate_files(
-        self,
-        output_stem: str,
-        multiplier: int,
-    ) -> None:
-        """Remove the known intermediates this extract left behind.
-
-        The CLI's extract pipeline writes three files in the working
-        directory, each derived deterministically from the
-        ``--output`` argument (here ``output_stem``):
-
-          1. ``{stem}.mp4``                       -- raw download from
-                                                     the exacqvision server
-          2. ``{stem}_{multiplier}x.mp4``         -- timelapsed
-                                                     pre-compression version
-          3. ``{stem}_{multiplier}x_libx264_*.mp4`` -- final compressed,
-                                                     already moved to
-                                                     ``exports/`` by
-                                                     ``_move_to_exports``
-
-        This method removes (1) and (2) by exact path; (3) was already
-        moved by the time we get here so there's nothing to do for it.
-
-        We deliberately do *not* glob the workspace for ``*.tmp`` /
-        ``*.log`` / ``temp_*`` / similar as the previous implementation
-        did -- those globs scanned the entire ExacqMan repo root and
-        could destroy unrelated files (per-job logs, hand-edited
-        scratch files, the git internals on some setups). If a future
-        intermediate gets added to the pipeline, it should be named
-        deterministically from ``output_stem`` and removed here by
-        exact path.
-
-        Failures to unlink are logged but never raised; cleanup must
-        not fail an otherwise successful job.
-        """
-        intermediates = (
-            self.working_directory / f"{output_stem}.mp4",
-            self.working_directory / f"{output_stem}_{multiplier}x.mp4",
-        )
-
-        removed: list[str] = []
-        for path in intermediates:
-            try:
-                if path.is_file():
-                    path.unlink()
-                    removed.append(path.name)
-            except OSError as e:
-                logger.warning(
-                    "Failed to remove intermediate file %s: %s",
-                    path, e,
-                )
-
-        if removed:
-            logger.info("Cleaned up intermediate files: %s", removed)
-        else:
-            logger.info(
-                "No intermediate files found to clean up "
-                "(stem=%s, multiplier=%s)",
-                output_stem, multiplier,
-            )
-    
-    async def _move_to_exports(
-        self,
-        source_path: Path,
-        dest_filename: str,
-    ) -> str:
-        """Move the CLI's reported output file to ``exports/`` under a clean name.
-
-        Args:
-            source_path: Absolute path to the file the CLI produced (the
-                value of ``done.output`` from the CLI's JSON event stream,
-                resolved against the CLI's working directory). Must exist.
-            dest_filename: The on-disk name to use under ``exports/``,
-                including extension (e.g. ``"name.mp4"``). The rename
-                deliberately hides CLI-internal naming details
-                (compression suffix, codec tag, etc.) from end users.
-
-        Returns:
-            Absolute path to the moved file under ``exports/``.
-
-        Raises:
-            FileNotFoundError: ``source_path`` does not exist. This
-                indicates either a CLI regression (``done.output``
-                pointed nowhere) or a race with another job; we
-                deliberately do not glob-rescue here because that's the
-                very behavior this refactor eliminated.
-        """
-        if not source_path.is_file():
-            raise FileNotFoundError(
-                f"CLI reported output file does not exist: {source_path}"
-            )
-
-        exports_dir = self.working_directory / "exacqman-web" / "exports"
-        exports_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_path = exports_dir / dest_filename
-        # `shutil.move` handles cross-filesystem moves (rename when
-        # possible, copy + unlink otherwise) and overwrites an existing
-        # destination, which is what we want when the user re-runs an
-        # extract with the same filename.
-        shutil.move(str(source_path), str(dest_path))
-        logger.info(
-            "Moved %s to exports as %s",
-            source_path.name,
-            dest_filename,
-        )
-        return str(dest_path)
     
     def validate_config_file(self, config_path: str) -> bool:
         """

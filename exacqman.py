@@ -42,6 +42,7 @@ class Settings:
     camera_id: int = None               # Camera ID resolved from the chosen alias on the chosen server
     input_filename: str = None          # Video filename that needs processed
     output_filename: str = None         # Desired name of output file (will always be .mp4)
+    output_dir: str = None              # When set, deliver a single clean .mp4 into this directory and remove intermediates
     date: str = None                    # MM/DD (e.g. '3/11') -- used by the positional human form
     start_time: str = None              # Start time of video (e.g. '6 pm', '6:30pm', '18:30')
     end_time: str = None                # End time of video (e.g. '6 pm', '6:30pm', '18:30')
@@ -183,6 +184,14 @@ class Settings:
                 arg_value='output_name',
                 config_value=runtime.get('filename'),
                 cls_value=cls.output_filename,
+            ),
+            # Flag-only, since "deliver here" is a per-invocation choice
+            # rather than a stable config-file default. Programmatic
+            # callers (the web service) always pass it; humans typically
+            # cd into their target directory and omit this.
+            output_dir=set_value(
+                arg_value='output_dir',
+                cls_value=cls.output_dir,
             ),
             date=set_value(
                 arg_value='date',
@@ -898,6 +907,22 @@ def parse_arguments():
     )
     extract_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file)')
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
+    extract_parser.add_argument(
+        '--output-dir',
+        type=str,
+        default=None,
+        dest='output_dir',
+        help=(
+            'Directory to deliver the final extracted video into. When set, '
+            'the directory is created if missing, the pipeline writes the '
+            'raw download, timelapsed, and final compressed files inside it, '
+            'and on successful completion the intermediates are removed and '
+            'the compressed file is renamed to a bare `{name}.mp4` -- so the '
+            'directory ends up holding exactly one user-facing deliverable. '
+            'When omitted, behavior is unchanged: all three files land in '
+            'the current working directory with their stem-based names.'
+        ),
+    )
     extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
     extract_parser.add_argument('--multiplier', type=int, help='Desired timelapse multiplier (must be a positive integer)')
     extract_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
@@ -918,6 +943,58 @@ def parse_arguments():
     timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     return arg_parser.parse_args()
+
+
+def _finalize_extract_output_dir(
+    output_dir: Path,
+    output_stem: str,
+    multiplier: int,
+    compressed_path: Path,
+) -> str:
+    """Collapse the extract pipeline's three outputs into one deliverable.
+
+    The extract pipeline writes three files inside ``output_dir``:
+
+      1. ``{stem}.mp4``                              -- raw download
+      2. ``{stem}_{multiplier}x.mp4``                -- timelapsed
+      3. ``{stem}_{multiplier}x_libx264_{quality}.mp4`` -- final compressed
+         (received here as ``compressed_path``)
+
+    This deletes (1) and (2), then renames (3) to ``{output_dir}/{stem}.mp4``
+    so the directory contains exactly one user-facing file -- the
+    finished artifact. The web service depends on this contract: when
+    it spawns the CLI with ``--output-dir=<exports/>``, the file it
+    finds at the reported ``done.output`` path is the only one left
+    behind, with a clean stem-based name and no codec suffix to strip.
+
+    Cleanup failures (unlink races, permission glitches) are logged as
+    warnings but don't fail the job -- the user already has the final
+    file, which is what matters.
+
+    Returns:
+        Absolute path to the renamed deliverable, as a string (matches
+        the type ``reporter.done(output=...)`` expects).
+    """
+    raw = output_dir / f"{output_stem}.mp4"
+    timelapsed = output_dir / f"{output_stem}_{multiplier}x.mp4"
+    deliverable = output_dir / f"{output_stem}.mp4"  # same path as `raw`; raw must be deleted first
+
+    reporter = get_reporter()
+    for path in (raw, timelapsed):
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError as exc:
+            reporter.warning(
+                f"Failed to remove intermediate {path}: {exc}",
+            )
+
+    # `Path.replace` is the cross-platform atomic-on-same-filesystem
+    # rename; it overwrites the destination if it somehow still exists
+    # (we just deleted `raw`, which IS the destination, so the slot
+    # should be empty -- but defensive code never hurts here).
+    compressed_path.replace(deliverable)
+    return str(deliverable)
 
 
 def _date_string_has_year(date: str) -> bool:
@@ -1153,11 +1230,32 @@ def main():
                     settings.timelapse_multiplier,
                 )
 
+            # Normalize --output-dir into an absolute Path. Resolving early
+            # means subsequent path math (the intermediate cleanup at the
+            # end of the pipeline) works regardless of whether the caller
+            # passed a relative or absolute argument, or whether the CWD
+            # changes mid-run for any reason.
+            extract_output_dir: "Path | None" = None
+            if settings.output_dir:
+                extract_output_dir = Path(settings.output_dir).resolve()
+                extract_output_dir.mkdir(parents=True, exist_ok=True)
+
             # Instantiate api class and retrieve video
             exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
 
             try:
-                extracted_video_name = exapi.get_video(settings.camera_id, start, end, video_filename=settings.output_filename)
+                # When `extract_output_dir` is set, the raw download lands
+                # in that directory; `process_video` and `compress_video`
+                # both default to writing next to their input, so the
+                # whole pipeline naturally flows into the same directory
+                # without any further threading.
+                extracted_video_name = exapi.get_video(
+                    settings.camera_id,
+                    start,
+                    end,
+                    video_filename=settings.output_filename,
+                    output_dir=extract_output_dir,
+                )
                 exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)  # Reinstantiated object because of auth token timeout.
                 video_timestamps = exapi.get_timestamps(settings.camera_id, start, end)
             except ExacqvisionError as e:
@@ -1175,6 +1273,23 @@ def main():
 
             processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
             final_path = compress_video(processed_video_path)
+
+            # When --output-dir is set, collapse the three pipeline files
+            # down to a single deliverable: delete the raw download and
+            # the timelapsed intermediate, then rename the compressed
+            # file to a bare `{stem}.mp4`. This is the programmatic-
+            # delivery contract -- the web service relies on this so it
+            # can spawn the CLI with --output-dir=<exports/> and treat
+            # the resulting file as the finished artifact, with no
+            # follow-up move/cleanup work.
+            if extract_output_dir is not None:
+                final_path = _finalize_extract_output_dir(
+                    extract_output_dir,
+                    output_stem=settings.output_filename,
+                    multiplier=settings.timelapse_multiplier,
+                    compressed_path=Path(final_path),
+                )
+
             reporter.done(output=final_path)
 
         elif args.command == 'compress':

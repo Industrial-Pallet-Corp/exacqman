@@ -1,4 +1,5 @@
 import requests, json
+from pathlib import Path
 from requests.exceptions import RequestException
 from time import sleep
 from datetime import datetime, timedelta
@@ -203,15 +204,22 @@ class Exacqvision:
         return progress == 100, progress
 
 
-    def export_download(self, export_id: str) -> str:
+    def export_download(self, export_id: str, output_dir: "Path | None" = None) -> str:
         """
         Downloads the completed video export.
 
         Args:
             export_id (str): ID of the export request.
+            output_dir (Path, optional): Directory to write the file into.
+                When ``None`` (default), the file is written into the current
+                working directory -- matching the historical CLI behavior.
+                When provided, the directory is created if missing and the
+                file lands at ``output_dir / {server-supplied-name}.mp4``.
 
         Returns:
-            str: Path to the downloaded video file.
+            str: Path to the downloaded video file. Absolute when
+                ``output_dir`` is provided; bare basename (in CWD)
+                otherwise.
         """
 
         url = f"{self.base_url}/v1/export.web?export={export_id}&action=download"
@@ -222,16 +230,27 @@ class Exacqvision:
         file_name = response.headers.get('Content-Disposition').split('filename=')[-1].strip('"')
         total_size = int(response.headers.get('content-length', 0))
 
+        # Where on disk we'll actually write the bytes. Historically this was
+        # always just `file_name` (i.e. CWD); honoring `output_dir` is how
+        # programmatic callers (the web service) deliver straight into their
+        # own output staging area without a follow-up move step.
+        if output_dir is not None:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / file_name
+        else:
+            output_path = Path(file_name)
+
         reporter = get_reporter()
         reporter.stage(
             "export_download",
             "Downloading footage",
-            filename=file_name,
+            filename=str(output_path),
             total_bytes=total_size,
         )
 
         try:
-            with open(file_name, 'wb') as file:
+            with open(output_path, 'wb') as file:
                 total_bytes_written = 0
                 for data in response.iter_content(chunk_size=65536):
                     total_bytes_written += file.write(data)
@@ -245,9 +264,13 @@ class Exacqvision:
         except Exception as e:
             raise ExacqvisionError(f"Download failed at {datetime.now()}: {str(e)}")
 
-        reporter.info(f"Saved {file_name}", filename=file_name, bytes_written=total_bytes_written)
+        reporter.info(
+            f"Saved {output_path}",
+            filename=str(output_path),
+            bytes_written=total_bytes_written,
+        )
 
-        return file_name
+        return str(output_path)
 
 
     def export_delete(self, export_id: str):
@@ -259,7 +282,15 @@ class Exacqvision:
         return response.text
 
 
-    def get_video(self, camera: int, start: datetime, stop: datetime, video_filename: str, num_of_retries: int = 5):
+    def get_video(
+        self,
+        camera: int,
+        start: datetime,
+        stop: datetime,
+        video_filename: str,
+        num_of_retries: int = 5,
+        output_dir: "Path | None" = None,
+    ):
         """
         Exports and downloads a video from the specified camera and time range.
 
@@ -267,11 +298,19 @@ class Exacqvision:
             camera (int):           ID of the camera.
             start (datetime):       Start time of the search as a datetime object.
             stop (datetime):        End time of the search as a datetime object.
-            video_filename (str):   Desired name for the exported video file.
+            video_filename (str):   Desired name for the exported video file
+                                    (the value the server uses for its
+                                    Content-Disposition header).
             num_of_retries (int):   How many times the script will retry if progress has not moved.
+            output_dir (Path, optional): Directory to write the downloaded
+                                    file into. When ``None``, the file goes
+                                    into the current working directory --
+                                    matching the historical behavior.
+                                    Forwarded to ``export_download``.
 
         Returns:
-            str: Path to the downloaded video file.
+            str: Path to the downloaded video file (absolute when
+                ``output_dir`` is provided, basename in CWD otherwise).
 
         Raises:
             ExacqvisionError: If the export or download fails.
@@ -305,7 +344,7 @@ class Exacqvision:
             if retries > num_of_retries:
                 raise ExacqvisionTimeoutError(f"Export {export_id} progress stalled for too long.")
 
-            return self.export_download(export_id)
+            return self.export_download(export_id, output_dir=output_dir)
 
         except Exception as e:
             raise ExacqvisionError(f"Failed to get video: {str(e)}")
