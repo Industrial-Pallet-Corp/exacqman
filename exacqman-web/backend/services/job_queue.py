@@ -58,6 +58,22 @@ job-specific files use the ``{job_id}.log`` convention (UUID stems) so they
 remain unambiguous next to anything else that lands here. Currently kept
 indefinitely -- cleanup is a separate maintenance concern."""
 
+EXPORTS_DIR = (
+    Path(__file__).resolve().parent.parent.parent / "exports"
+)
+"""Directory where the CLI delivers finished extracts (and where the UI's
+file browser reads from). Mirrors the path the CLI is told to write into
+via ``--output-dir`` in ``services.exacqman_service``; we recompute it
+here so the prune step doesn't have to thread a reference through the
+JobQueue constructor."""
+
+MAX_EXPORT_FILES = 25
+"""Hard cap on the number of finished-extract .mp4 files retained in
+``EXPORTS_DIR``. Enforced after each successful job: if the new arrival
+pushes the count over this, the oldest files (by mtime) are removed
+until the count is back at the cap. The UI surfaces this as a
+"most recent 25" qualifier on the Extracted Footage panel header."""
+
 # The user-facing failure message lives on `ExtractFailure` in
 # ``services.exacqman_service``:
 #   * For CLI-originated failures with a recognised structured type
@@ -143,6 +159,50 @@ def _write_job_log(job_id: str, handler: _JobLogHandler, exc: BaseException) -> 
 def job_log_path(job_id: str) -> Path:
     """Resolve where the on-disk log for ``job_id`` lives. Caller checks existence."""
     return JOB_LOG_DIR / f"{job_id}.log"
+
+
+def _prune_exports_to_limit(limit: int = MAX_EXPORT_FILES) -> List[str]:
+    """Trim ``EXPORTS_DIR`` so it holds at most ``limit`` ``.mp4`` files.
+
+    Sorts the directory's ``.mp4`` files by mtime ascending (oldest
+    first) and deletes whatever's needed to bring the count down to
+    ``limit``. Returns the basenames of removed files for the caller to
+    log. Best-effort -- any unlink failure is logged and the loop
+    continues, and a missing directory simply yields an empty result.
+
+    Designed to be called from the job worker's success path, after the
+    new artifact has landed but before the lock is taken to publish the
+    completed state. Doing it outside the lock keeps file I/O off the
+    snapshot-poll hot path; doing it post-success ensures we never
+    delete a slot in service of a job that ultimately fails (the file
+    that would have replaced it wouldn't exist).
+    """
+    try:
+        if not EXPORTS_DIR.is_dir():
+            return []
+        files = sorted(
+            (
+                p for p in EXPORTS_DIR.iterdir()
+                if p.is_file() and p.suffix.lower() == ".mp4"
+            ),
+            key=lambda p: p.stat().st_mtime,
+        )
+    except OSError as exc:
+        logger.warning("Failed to enumerate %s for pruning: %s", EXPORTS_DIR, exc)
+        return []
+
+    excess = len(files) - limit
+    if excess <= 0:
+        return []
+
+    removed: List[str] = []
+    for path in files[:excess]:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError as exc:
+            logger.warning("Failed to prune old export %s: %s", path, exc)
+    return removed
 
 
 class BacklogFullError(Exception):
@@ -342,6 +402,19 @@ class JobQueue:
                 job.rate_label = rate_label
 
             result: Any = await self._run_extract(request, progress_callback)
+
+            # New deliverable has landed in EXPORTS_DIR; enforce the
+            # retention cap before we publish the completed status. We
+            # do this outside the lock so file I/O can't block a poll,
+            # and only on the success path so a failed job never
+            # "consumes" a slot. Pruning is best-effort and silent on
+            # failure -- a logged warning is enough.
+            removed = _prune_exports_to_limit()
+            if removed:
+                logger.info(
+                    "Pruned %d oldest export(s) to keep <= %d in %s: %s",
+                    len(removed), MAX_EXPORT_FILES, EXPORTS_DIR, removed,
+                )
 
             async with self._lock:
                 job.status = JobStatusEnum.COMPLETED

@@ -522,6 +522,18 @@ label {
     margin-bottom: var(--spacing-5);
 }
 
+/* Inline subtitle inside the "Extracted Footage" heading. We keep the
+ * note inside the <h2> so the panel's existing bottom-border underline
+ * spans both the title and the qualifier as one unit; the smaller font
+ * and lighter color visually de-emphasize the qualifier vs. the title.
+ * The h2's own bottom-border / padding / margin still apply. */
+.files-header h2 .files-header-note {
+    font-size: var(--font-size-sm);
+    font-weight: 400;
+    color: var(--gray-500);
+    margin-left: var(--spacing-2);
+}
+
 .file-filters {
     background-color: var(--gray-50);
     border: 1px solid var(--gray-200);
