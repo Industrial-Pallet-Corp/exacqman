@@ -42,9 +42,16 @@ class Settings:
     camera_id: int = None               # Camera ID resolved from the chosen alias on the chosen server
     input_filename: str = None          # Video filename that needs processed
     output_filename: str = None         # Desired name of output file (will always be .mp4)
-    date: str = None                    # MM/DD (e.g. '3/11')
+    date: str = None                    # MM/DD (e.g. '3/11') -- used by the positional human form
     start_time: str = None              # Start time of video (e.g. '6 pm', '6:30pm', '18:30')
     end_time: str = None                # End time of video (e.g. '6 pm', '6:30pm', '18:30')
+    # ISO 8601 datetime pair, populated only from --start-iso-datetime /
+    # --end-iso-datetime. When set, these take precedence over date +
+    # start_time + end_time and skip the year/day fixup heuristics in
+    # `convert_input_to_datetime`. Programmatic callers (the web service)
+    # use these to hand the CLI an unambiguous instant.
+    start_iso_datetime: str = None
+    end_iso_datetime: str = None
 
     @classmethod
     def from_args_and_config(
@@ -191,6 +198,18 @@ class Settings:
                 arg_value='end',
                 config_value=runtime.get('end_time'),
                 cls_value=cls.end_time,
+            ),
+            # ISO 8601 pair. Flag-only (no config-file source) because
+            # encoding an exact instant in a reusable config file would be
+            # an anti-pattern -- if you want a recurring time, use the
+            # human-friendly `runtime.date` / `runtime.start_time` pair.
+            start_iso_datetime=set_value(
+                arg_value='start_iso_datetime',
+                cls_value=cls.start_iso_datetime,
+            ),
+            end_iso_datetime=set_value(
+                arg_value='end_iso_datetime',
+                cls_value=cls.end_iso_datetime,
             ),
         )
 
@@ -821,7 +840,53 @@ def parse_arguments():
     extract_parser.add_argument('date', nargs='?', default=None, type=str, help='Date of the requested video. If the footage spans past midnight, provide the date on which the footage starts. (e.g. 3/11)')
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
     extract_parser.add_argument('end', nargs='?', default=None, type=str, help='Ending timestamp of video requested (e.g. 5pm)')
-    extract_parser.add_argument('config_file', type=str, help='Filepath of local TOML config file')
+    # `config_file` is `nargs='?'` so callers can use the equivalent `--config`
+    # flag instead -- handy for programmatic callers (the web service) that
+    # don't want to compose 5 positionals in the right order. main() validates
+    # that exactly one of the two sources is set.
+    extract_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config)')
+    extract_parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        dest='config_flag',
+        help=(
+            'Filepath of local TOML config file. Flag-form alternative to the '
+            'positional config_file; one of the two must be set.'
+        ),
+    )
+    # ISO 8601 flag pair (e.g. 2026-05-27T09:30:00 or with offset/TZ).
+    # When both are given, they take precedence over the positional
+    # date/start/end form and skip the year/day fixup heuristics in
+    # `convert_input_to_datetime`. Programmatic callers (the web service)
+    # use these so the timestamp travels unambiguously instead of being
+    # round-tripped through a lossy `%m/%d` + `%I:%M%p` representation.
+    # The "iso" in the flag name is deliberate -- it makes the expected
+    # format obvious at the call site and distinguishes these from the
+    # human-friendly positional `date` / `start` / `end` arguments.
+    extract_parser.add_argument(
+        '--start-iso-datetime',
+        type=str,
+        default=None,
+        dest='start_iso_datetime',
+        help=(
+            'ISO 8601 start datetime, e.g. 2026-05-27T09:30:00 (optionally '
+            'with timezone offset, e.g. 2026-05-27T09:30:00-04:00). When set, '
+            '--end-iso-datetime must also be set and the positional '
+            'date/start/end arguments must be omitted.'
+        ),
+    )
+    extract_parser.add_argument(
+        '--end-iso-datetime',
+        type=str,
+        default=None,
+        dest='end_iso_datetime',
+        help=(
+            'ISO 8601 end datetime, e.g. 2026-05-27T09:45:00 (optionally with '
+            'timezone offset). When set, --start-iso-datetime must also be set '
+            'and the positional date/start/end arguments must be omitted.'
+        ),
+    )
     extract_parser.add_argument(
         '--credentials',
         type=str,
@@ -855,29 +920,69 @@ def parse_arguments():
     return arg_parser.parse_args()
 
 
-def convert_input_to_datetime(date:str, start:str, end:str) -> tuple[datetime, datetime]:
+def _date_string_has_year(date: str) -> bool:
+    """Detect whether `date` carries an explicit year component.
+
+    `dateutil.parser.parse` fills in missing fields from its `default`
+    argument (default-of-the-default is `datetime.now()`). If we parse
+    the same string twice with two wildly different defaults and get
+    back the same year, the year must have come from the input itself
+    rather than the default -- i.e. it was explicit.
+
+    This lets `convert_input_to_datetime` distinguish "5/27" (year
+    inferred) from "5/27/26" (year explicit) without baking in a
+    fragile regex for every accepted date format.
     """
-    Converts date and time strings to datetime objects for video extraction.
+    if not date:
+        return False
+    try:
+        with_low = duparse(date, default=datetime(2000, 1, 1))
+        with_high = duparse(date, default=datetime(2100, 1, 1))
+    except (ValueError, OverflowError, TypeError):
+        # Malformed input gets re-parsed (and erred) by the main path
+        # in `convert_input_to_datetime`; here we just fall back to
+        # "no explicit year" so the heuristic stays conservative.
+        return False
+    return with_low.year == with_high.year
+
+
+def convert_input_to_datetime(date: str, start: str, end: str) -> tuple[datetime, datetime]:
+    """Convert date and time strings to datetime objects for video extraction.
 
     Args:
-        date (str): Date in MM/DD format (e.g., '3/11').
-        start (str): Start time (e.g., '6 pm', '18:30').
-        end (str): End time (e.g., '6 pm', '18:30').
+        date: Date string. Accepts year-less MM/DD ("5/27") or year-bearing
+            variants ("5/27/26", "5/27/2026", "2026-05-27", ...). Anything
+            dateutil can parse works.
+        start: Start time (e.g. "6 pm", "18:30").
+        end: End time (e.g. "6 pm", "18:30").
 
     Returns:
-        tuple[datetime, datetime]: Start and end datetime objects, adjusted for year and day if needed.
+        (start, end) as naive datetime objects. Two convenience fixups
+        are applied for the human input shorthand:
+
+        * If the user didn't supply a year and the parsed start lands in
+          the future, both timestamps are shifted back one year (the
+          user almost certainly meant "the most recent past 5/27", not
+          "11 months from now").
+        * If the end time falls before the start time on the same day,
+          the end date is rolled forward 24h (handles 11pm -> 1am spans).
+
+        When the user supplies an explicit year (e.g. "5/27/26 6pm"), the
+        year-shift is suppressed so the input is honored verbatim.
     """
-    
+
     start_datetime = duparse(f'{date} {start}')
     end_datetime = duparse(f'{date} {end}')
 
-    # Adjust the date's year from the current year to the previous if the date hasn't happened yet.
-    if start_datetime > datetime.now():
+    if not _date_string_has_year(date) and start_datetime > datetime.now():
+        # Year was inferred from "current year" and we're aimed at the
+        # future -- shift back so the user's "5/27" means "the most
+        # recent past 5/27". An explicit year ("5/27/26") bypasses this
+        # so future-dated extracts stay future-dated.
         start_datetime = start_datetime - relativedelta(years=1)
         end_datetime = end_datetime - relativedelta(years=1)
 
-    # Adjust the end timestamp date to the following day if the end time occurs earlier than the start time.
-    if end_datetime < start_datetime :
+    if end_datetime < start_datetime:
         end_datetime = end_datetime + timedelta(days=1)
 
     return start_datetime, end_datetime
@@ -906,8 +1011,28 @@ def main():
 
     config = None
 
-    # If config file is specified in args, then read the config.
-    config_file = getattr(args, 'config_file', None)
+    # Resolve the config file from either the positional `config_file` or the
+    # equivalent `--config` flag. The flag form exists so programmatic callers
+    # (the web service) can compose a command using flags only, without having
+    # to fill in placeholder positionals for date/start/end. Humans typing the
+    # canonical 5-positional form still hit the positional slot directly.
+    # When both are given they must agree; mismatched values are a usage error.
+    positional_config = getattr(args, 'config_file', None)
+    flag_config = getattr(args, 'config_flag', None)
+    if positional_config and flag_config and positional_config != flag_config:
+        get_reporter().error(
+            "ConfigError",
+            (
+                "Both positional config_file and --config were given with "
+                f"different values ({positional_config!r} vs {flag_config!r}); "
+                "specify only one."
+            ),
+        )
+        exit(1)
+    config_file = positional_config or flag_config
+    # Mirror the resolved value back onto args so the rest of main() sees a
+    # consistent `args.config_file` regardless of which form the caller used.
+    args.config_file = config_file
     auth = None
     if config_file:
         config = import_config(config_file)
@@ -940,7 +1065,74 @@ def main():
         if args.command == 'extract':
             timezone = ZoneInfo(settings.timezone)
 
-            start, end = convert_input_to_datetime(settings.date, settings.start_time, settings.end_time)
+            # Two ways to specify the time range:
+            #   1. ISO 8601 flags (--start-iso-datetime / --end-iso-datetime)
+            #      -- the programmatic form. Unambiguous: no year/day
+            #      fixups, full precision down to seconds, optional
+            #      timezone offset.
+            #   2. Positional date + start + end (or runtime.{date,start_time,
+            #      end_time} in the config) -- the human form. Goes through
+            #      `convert_input_to_datetime`, which infers the year only
+            #      when the user didn't supply one (e.g. "5/27" without a
+            #      year defaults to "the most recent past 5/27") and rolls
+            #      the end date forward if it lands before the start.
+            # Precedence: ISO flags > positional CLI args > config-file
+            # [runtime] values. Mixing ISO flags with positional CLI args
+            # is a usage error (the user gave two conflicting intents on
+            # the same command line); silently overriding [runtime] config-
+            # file defaults with ISO flags is fine -- that's just normal
+            # CLI-beats-config precedence, and avoids forcing users to
+            # strip leftover `runtime.date`/etc. from configs that are
+            # otherwise reusable.
+            iso_start = settings.start_iso_datetime
+            iso_end = settings.end_iso_datetime
+            has_iso = bool(iso_start or iso_end)
+            # Check the *raw args namespace* (what the user typed on this
+            # invocation) rather than the merged `settings`, so config-file
+            # values don't trip the mixing guard.
+            has_positional_cli_time = bool(
+                getattr(args, 'date', None)
+                or getattr(args, 'start', None)
+                or getattr(args, 'end', None)
+            )
+
+            if has_iso and (bool(iso_start) ^ bool(iso_end)):
+                reporter.error(
+                    "ConfigError",
+                    "--start-iso-datetime and --end-iso-datetime must be provided together.",
+                )
+                exit(1)
+            if has_iso and has_positional_cli_time:
+                reporter.error(
+                    "ConfigError",
+                    (
+                        "Cannot combine --start-iso-datetime/--end-iso-datetime "
+                        "with the positional date/start/end arguments on the "
+                        "same command. Pick one form."
+                    ),
+                )
+                exit(1)
+
+            if has_iso:
+                try:
+                    start = datetime.fromisoformat(iso_start)
+                    end = datetime.fromisoformat(iso_end)
+                except ValueError as exc:
+                    reporter.error(
+                        "ConfigError",
+                        f"Invalid ISO 8601 datetime: {exc}",
+                    )
+                    exit(1)
+                if end < start:
+                    reporter.error(
+                        "ConfigError",
+                        "--end-iso-datetime must be at or after --start-iso-datetime.",
+                    )
+                    exit(1)
+            else:
+                start, end = convert_input_to_datetime(
+                    settings.date, settings.start_time, settings.end_time
+                )
 
             # If the user didn't pass -o (and `runtime.filename` wasn't
             # set in the config either), build the canonical default

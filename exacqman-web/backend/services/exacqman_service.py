@@ -137,15 +137,24 @@ class ExacqManService:
         """
         cmd_args = []
         try:
-            # Convert datetime objects to the format expected by ExacqMan CLI
-            start_date = request.start_datetime.strftime("%m/%d")
-            start_time = request.start_datetime.strftime("%I:%M%p").lstrip('0')
-            end_time = request.end_datetime.strftime("%I:%M%p").lstrip('0')
-
-            # Generate output filename
             output_filename = self._generate_output_filename(request)
 
-            # Build command arguments.
+            # Build command arguments. We use flag forms exclusively (except for
+            # the leading `camera_alias` positional) so the call is unambiguous
+            # and order-independent:
+            #
+            #   * `--config` instead of the positional `config_file` -- the
+            #     positional `extract` form would normally also require `date`,
+            #     `start`, and `end` positionals to land `config_file` in the
+            #     right slot; the flag form lets us skip those entirely.
+            #   * `--start-iso-datetime` / `--end-iso-datetime` (ISO 8601)
+            #     instead of the positional `date` / `start` / `end` strings.
+            #     This carries the exact instant -- including year and
+            #     timezone -- with no intermediate lossy `%m/%d` + `%I:%M%p`
+            #     round-trip and no year/day fixup heuristics on the CLI
+            #     side. The "iso" prefix on the flag name makes the
+            #     expected format obvious at the call site.
+            #
             # -u runs Python unbuffered so events stream in real time.
             # --progress-format=json makes the CLI emit one JSON event per line.
             cmd_args = [
@@ -153,10 +162,9 @@ class ExacqManService:
                 "--progress-format=json",
                 "extract",
                 request.camera_alias,
-                start_date,
-                start_time,
-                end_time,
-                request.config_file,
+                "--config", request.config_file,
+                "--start-iso-datetime", request.start_datetime.isoformat(),
+                "--end-iso-datetime", request.end_datetime.isoformat(),
                 "--multiplier", str(request.timelapse_multiplier),
                 "-c",  # Enable cropping to apply crop_dimensions and font_weight settings
                 "-o", output_filename,
