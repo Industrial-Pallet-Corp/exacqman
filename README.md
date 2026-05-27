@@ -52,7 +52,9 @@ python exacqman.py extract [camera_alias] [date] [start] [end] [config_file] [--
 - `date`: Date in MM/DD format (e.g., "3/11"). Use the start date if footage spans midnight.
 - `start`: Start time (e.g., "6pm", "18:30").
 - `end`: End time (e.g., "8pm", "20:00").
-- `config_file`: Path to configuration file.
+- `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
+- `--config`: Flag-form alternative to the positional `config_file`. Handy for programmatic callers that prefer named flags over positional ordering.
+- `--start-iso-datetime` / `--end-iso-datetime`: ISO 8601 datetimes (e.g. `2026-05-27T09:30:00`, or with offset `2026-05-27T09:30:00-04:00`). When provided together, they replace the positional `date`/`start`/`end` form -- no year inference, no day rollover heuristic, full second-level precision. Intended for programmatic callers (the web UI uses these); humans should keep using the positional form. Cannot be combined with the positional `date`/`start`/`end` arguments on the same command.
 - `--server`: Server name (e.g., "ch" for Clark Hill).
 - `-o, --output_name`: Output file path. When omitted (and `runtime.filename` is unset in the config), the CLI builds a canonical default of the form `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` so filenames are deterministic and sort by date.
 - `--quality`: Compression quality (`low`, `medium`, `high`).
