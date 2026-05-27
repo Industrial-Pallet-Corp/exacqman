@@ -5,6 +5,7 @@ from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as duparse
 from zoneinfo import ZoneInfo
 from exacqvision import Exacqvision, ExacqvisionError
+from exacqman_naming import default_output_stem
 from progress import init_reporter, get_reporter
 import argparse
 import cv2
@@ -940,6 +941,25 @@ def main():
             timezone = ZoneInfo(settings.timezone)
 
             start, end = convert_input_to_datetime(settings.date, settings.start_time, settings.end_time)
+
+            # If the user didn't pass -o (and `runtime.filename` wasn't
+            # set in the config either), build the canonical default
+            # output stem from the same shared helper the web service
+            # uses. Without this the exacqvision server picks the
+            # filename via Content-Disposition, which is unpredictable
+            # and doesn't sort by date the way our convention does.
+            #
+            # Mutating settings here (rather than threading a local
+            # through) keeps the rest of the extract pipeline -- which
+            # already reads settings.output_filename in multiple places
+            # -- working without modification.
+            if not settings.output_filename:
+                settings.output_filename = default_output_stem(
+                    start,
+                    settings.server,
+                    settings.camera_alias,
+                    settings.timelapse_multiplier,
+                )
 
             # Instantiate api class and retrieve video
             exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)

@@ -54,7 +54,7 @@ python exacqman.py extract [camera_alias] [date] [start] [end] [config_file] [--
 - `end`: End time (e.g., "8pm", "20:00").
 - `config_file`: Path to configuration file.
 - `--server`: Server name (e.g., "ch" for Clark Hill).
-- `-o, --output_name`: Output file path (default: based on input with suffixes).
+- `-o, --output_name`: Output file path. When omitted (and `runtime.filename` is unset in the config), the CLI builds a canonical default of the form `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` so filenames are deterministic and sort by date.
 - `--quality`: Compression quality (`low`, `medium`, `high`).
 - `--multiplier`: Timelapse speed factor (positive integer).
 - `-c, --crop`: Enable cropping (interactive if `crop_dimensions` not set).

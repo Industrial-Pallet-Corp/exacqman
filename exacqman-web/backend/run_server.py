@@ -24,6 +24,14 @@ from pathlib import Path
 backend_dir = Path(__file__).parent
 sys.path.insert(0, str(backend_dir))
 
+# Make the ExacqMan project root importable so backend modules can pull
+# in shared helpers that live alongside the CLI (e.g. ``exacqman_naming``).
+# Layout: <project_root>/exacqman-web/backend/run_server.py -> root is two
+# levels up. Insert *after* backend_dir so backend-local imports still win
+# if there's ever a name collision.
+project_root = backend_dir.parent.parent
+sys.path.insert(1, str(project_root))
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Start ExacqMan Web Server')
     parser.add_argument('--port', '-p', type=int, default=8000,

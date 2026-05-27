@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, Any, Callable, NamedTuple, Optional, Tuple
 
 from api.models import ExtractRequest
+from exacqman_naming import default_output_stem, sanitize_filename_component
 
 logger = logging.getLogger(__name__)
 
@@ -529,26 +530,30 @@ class ExacqManService:
         return event
 
     def _generate_output_filename(self, request: ExtractRequest) -> str:
-        """
-        Generate the output filename stem for the extract operation.
+        """Resolve the output filename stem for this extract request.
 
-        When ``request.filename`` is supplied, it is sanitized and used
-        verbatim. Otherwise the service generates a stem of the form
-        ``{date}_{time}_{server}_{camera}_{multiplier}x`` so filenames
-        remain unambiguous across servers (the same camera alias can exist
-        under multiple servers).
+        Thin wrapper around the shared naming helpers in
+        ``exacqman_naming``:
+
+          * If the user typed a custom filename in the UI, normalize it
+            via ``sanitize_filename_component`` (lowercase + hyphenate).
+            Length and path-separator validation already happened on the
+            API model layer (``ExtractRequest``).
+          * Otherwise build the canonical default stem via
+            ``default_output_stem``.
 
         Returns:
-            Filename stem without an extension; exacqman.py adds ``.mp4``.
+            Filename stem without an extension; exacqman.py / our
+            ``planned_output_filename`` adds ``.mp4``.
         """
         if request.filename:
-            return self._sanitize_filename_component(request.filename)
-
-        date_str = request.start_datetime.strftime("%Y-%m-%d")
-        time_str = self._format_time_for_filename(request.start_datetime)
-        server = self._sanitize_filename_component(request.server) if request.server else "unknown"
-        camera = self._sanitize_filename_component(request.camera_alias)
-        return f"{date_str}_{time_str}_{server}_{camera}_{request.timelapse_multiplier}x"
+            return sanitize_filename_component(request.filename)
+        return default_output_stem(
+            request.start_datetime,
+            request.server,
+            request.camera_alias,
+            request.timelapse_multiplier,
+        )
 
     def planned_output_filename(self, request: ExtractRequest) -> str:
         """
@@ -561,26 +566,7 @@ class ExacqManService:
         """
         return f"{self._generate_output_filename(request)}.mp4"
 
-    @staticmethod
-    def _sanitize_filename_component(value: str) -> str:
-        """Lowercase and replace whitespace with hyphens for filesystem safety."""
-        return value.lower().replace(" ", "-")
-    
-    def _format_time_for_filename(self, datetime_obj) -> str:
-        """
-        Format datetime as 24-hour HHMM for use in filename stems.
 
-        e.g. 9:15 am becomes ``0915``; 3:42 pm becomes ``1542``. 24-hour
-        avoids the am/pm suffix entirely and sorts lexically by clock time.
-
-        Args:
-            datetime_obj: datetime object
-
-        Returns:
-            Formatted time string for filename
-        """
-        return f"{datetime_obj.hour:02d}{datetime_obj.minute:02d}"
-    
     async def _cleanup_intermediate_files(
         self,
         output_stem: str,
