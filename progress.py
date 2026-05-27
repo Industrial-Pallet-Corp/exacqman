@@ -243,16 +243,40 @@ class JsonReporter(Reporter):
     are always emitted immediately. A throttled progress value is buffered and
     flushed on the next stage transition so the consumer always sees the final
     progress of a stage.
+
+    Progress events for rate-meaningful units (``bytes`` and ``frames``)
+    additionally carry a pre-formatted ``rate_label`` field (e.g.
+    ``"12.4 MB/s"`` or ``"140 FPS"``). The rate is computed here at the
+    source -- where the samples originate -- using an EMA whose smoothing
+    factor matches tqdm's default of 0.3, so the JSON stream and the
+    human-mode tqdm bar agree on how aggressively to smooth. Consumers
+    (the web service today, anything else later) can render
+    ``rate_label`` directly without recomputing.
     """
 
     PROGRESS_THROTTLE_S = 0.2
+
+    # EMA factor for the per-stage rate calculation; the higher the
+    # value the more responsive but jumpier the displayed rate. 0.3
+    # mirrors tqdm's default so a human running the same job in TTY
+    # mode sees an equivalently smoothed rate via tqdm's built-in bar.
+    _RATE_SMOOTHING = 0.3
 
     def __init__(self):
         self._last_progress_emit = 0.0
         self._last_progress_stage: Optional[str] = None
         self._buffered_progress: Optional[dict] = None
+        # Per-stage rate state: stage -> (prev_current, prev_ts, ema_rate).
+        # We only look at the active stage's entry, so stale entries from
+        # earlier stages cost a few bytes and nothing else; we don't clean
+        # them up. Each JsonReporter instance is per-process so this resets
+        # naturally across runs.
+        self._rate_state: dict = {}
 
     def _emit(self, payload: dict) -> None:
+        # `setdefault` so a sample-time ``ts`` we set in `update()` is
+        # preserved here; only synthesize the timestamp for events that
+        # didn't carry one (stage / info / warning / error / done).
         payload.setdefault("ts", time.time())
         sys.stdout.write(json.dumps(payload, separators=(",", ":"), default=str))
         sys.stdout.write("\n")
@@ -266,6 +290,50 @@ class JsonReporter(Reporter):
         self._last_progress_emit = time.time()
         self._last_progress_stage = self._buffered_progress["stage"]
         self._buffered_progress = None
+
+    def _compute_rate_label(
+        self,
+        stage: str,
+        unit: str,
+        current: int,
+        ts: float,
+    ) -> Optional[str]:
+        """Update per-stage rate state and return a formatted label, or None.
+
+        Only the two rate-meaningful units are tracked:
+          * ``bytes`` -> formatted as ``"<x.x> MB/s"`` (decimal MB, matching
+            disk-throughput convention rather than tqdm's binary MiB).
+          * ``frames`` -> formatted as ``"<n> FPS"``.
+
+        Other units (percent, empty, etc.) return ``None``. The first
+        progress event in a stage also returns ``None`` because we need
+        two samples to compute a delta. Subsequent samples are smoothed
+        with an EMA (factor ``_RATE_SMOOTHING``) so the displayed value
+        stays readable instead of jittering with every throttled update.
+        """
+        if unit not in ("bytes", "frames"):
+            return None
+        prev = self._rate_state.get(stage)
+        if prev is None:
+            # First sample in this stage; seed and emit no rate yet.
+            self._rate_state[stage] = (current, ts, None)
+            return None
+        prev_current, prev_ts, prev_ema = prev
+        delta_current = current - prev_current
+        delta_ts = ts - prev_ts
+        if delta_ts <= 0 or delta_current < 0:
+            # Same instant or non-monotonic progress (rare, defensive).
+            return None
+        instant = delta_current / delta_ts
+        ema = instant if prev_ema is None else (
+            self._RATE_SMOOTHING * instant
+            + (1.0 - self._RATE_SMOOTHING) * prev_ema
+        )
+        self._rate_state[stage] = (current, ts, ema)
+        if unit == "bytes":
+            return f"{ema / 1_000_000:.1f} MB/s"
+        # unit == "frames"
+        return f"{int(round(ema))} FPS"
 
     def stage(self, name: str, message: Optional[str] = None, **meta: Any) -> None:
         self._flush_buffered_progress()
@@ -287,20 +355,30 @@ class JsonReporter(Reporter):
         if total is None or total <= 0:
             return
         clamped = min(int(current), int(total))
+
+        # Capture sample-receipt time once. This is also what we embed
+        # as `ts` in the emitted payload (via the buffered dict), so any
+        # consumer reading `ts` sees the time we observed the sample
+        # rather than the (potentially throttled) emit time.
+        ts = time.time()
+
         progress = {
             "stage": stage,
             "current": clamped,
             "total": int(total),
             "unit": unit,
+            "ts": ts,
         }
         if message is not None:
             progress["message"] = message
+        rate_label = self._compute_rate_label(stage, unit, clamped, ts)
+        if rate_label is not None:
+            progress["rate_label"] = rate_label
         self._buffered_progress = progress
 
-        now = time.time()
         is_terminal = clamped >= int(total)
         same_stage = stage == self._last_progress_stage
-        throttled = same_stage and (now - self._last_progress_emit) < self.PROGRESS_THROTTLE_S
+        throttled = same_stage and (ts - self._last_progress_emit) < self.PROGRESS_THROTTLE_S
         if throttled and not is_terminal:
             return
         self._flush_buffered_progress()
