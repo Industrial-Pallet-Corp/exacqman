@@ -2,6 +2,8 @@
 
 A Python-based tool for extracting video footage from ExacqVision servers using the ExacqVision Web API. It supports creating timelapse videos, compressing footage, and overlaying timestamps, with flexible configuration via command-line arguments and config files.
 
+A browser-based frontend is available in [`exacqman-web/`](exacqman-web/README.md), which wraps the same CLI behind a small FastAPI service. The web README also documents the **CLI ↔ backend integration contract** (JSON event stream, stage taxonomy, error types, exit codes) for anyone building other programmatic callers on top of `exacqman.py`.
+
 For API testing, [explore the Postman collection](https://weareipc.postman.co/workspace/Industrial-Pallet-Corp~f0dc5379-c365-405e-8a29-ee8050839c42/collection/38801065-56761369-c40d-4cb1-9ab1-3f0a7efb59c9?action=share&creator=38801065&active-environment=7096363-3d41cab2-1adc-47b2-8041-ef8c9b87eb00).
 
 ## Requirements
