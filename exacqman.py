@@ -514,6 +514,21 @@ def validate_config(config: dict) -> bool:
     return True
 
 
+# Overlay layout constants for `process_video`. Module-level so they're a
+# single, greppable knob and don't get re-bound on every frame. The "max
+# text width" fractions cap how much of the frame the timestamp/caption
+# block is allowed to occupy: landscape footage gets the middle third
+# (text stays a tidy band centered in the frame, doesn't compete with the
+# camera image), portrait/square footage keeps the historical 80% (a third
+# of an already-narrow frame would be unreadably small). The bottom margin
+# is the gap between the BOTTOM-MOST text line's baseline and the floor of
+# the frame -- preserved whether the bottom line is the timestamp (no
+# caption) or the caption (timestamp moves up to keep this invariant).
+LANDSCAPE_MAX_TEXT_WIDTH_FRACTION = 1 / 3
+DEFAULT_MAX_TEXT_WIDTH_FRACTION = 0.8
+BOTTOM_MARGIN_FRACTION = 0.10
+
+
 def process_video(original_video_path: str, output_video_path: str = None, timestamps: list[datetime] = None) -> str:
     """
     Processes a video by cropping, timelapsing, and timestamping it based on attributes of the settings object.
@@ -596,30 +611,55 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         return coords
 
 
-    def calculate_font_scale(video_width: int) -> float:
-        # Static timestamp to calculate scale
+    def calculate_font_scale(video_width: int, video_height: int, caption: Optional[str]) -> float:
+        # Static timestamp string: the format is fixed-width so its rendered
+        # width never changes frame-to-frame.
         timestamp_string = datetime(2025, 3, 28, 6, 43, 20).strftime('%Y-%m-%d %H:%M:%S')
 
-        # Calculate available width for the text (80% of the video width)
-        max_text_width = int(video_width * 0.8)
+        # Landscape footage (width > height) caps to the middle third so
+        # the overlay doesn't dominate wide frames; portrait/square keeps
+        # the historical 80% cap.
+        is_landscape = video_width > video_height
+        fraction = (LANDSCAPE_MAX_TEXT_WIDTH_FRACTION if is_landscape
+                    else DEFAULT_MAX_TEXT_WIDTH_FRACTION)
+        max_text_width = int(video_width * fraction)
 
-        # Dynamically determine font scale based on text width
-        text_size = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0]
-        text_width, text_height = text_size
+        # Pick a font scale that fits whichever line (timestamp or caption)
+        # is widest at scale=1. The caption is rendered at 0.8x the
+        # timestamp's scale (preserved from the historical 0.8 ratio so a
+        # plain timestamp looks identical to before -- the cap binds the
+        # output, the ratio governs visual hierarchy), so its effective
+        # width at the chosen scale is `caption_w_at_1 * scale * 0.8`.
+        # Comparing widths AT SCALE=1 lets us solve for `scale` in one step.
+        ts_w_at_1 = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0][0]
+        widest_at_1 = ts_w_at_1
+        if caption:
+            caption_w_at_1 = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0][0]
+            widest_at_1 = max(widest_at_1, caption_w_at_1 * 0.8)
 
-        font_scale = max_text_width / text_width
-        
-        return font_scale
+        return max_text_width / widest_at_1
 
 
-    def calculate_xy_text_position(video_height: int, video_width: int, timestamp_string: str, font_scale: float) -> tuple[int]:
-        # Recalculate text size with the dynamic font scale
+    def calculate_xy_text_position(
+        video_height: int,
+        video_width: int,
+        timestamp_string: str,
+        font_scale: float,
+        caption_y_offset: Optional[int] = None,
+    ) -> tuple[int, int]:
         text_size = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, font_scale, settings.font_weight)[0]
-        text_width, text_height = text_size
-
-        # Calculate position: centered horizontally, with 10% margin at the bottom
+        text_width, _ = text_size
         x_position = (video_width - text_width) // 2  # Center horizontally
-        y_position = int(video_height - (video_height * 0.1))  # 10% margin from the bottom
+
+        # Anchor the BOTTOM-MOST text line's baseline at a fixed margin
+        # above the floor. Without a caption that's the timestamp itself
+        # (identical to the legacy behaviour). With a caption, the caption
+        # sits below the timestamp by exactly `caption_y_offset`, so the
+        # timestamp moves up by that offset -- which keeps the caption's
+        # baseline at the same 10% margin and prevents the bleed-off-the-
+        # bottom symptom that motivated this change.
+        bottom_anchor_y = int(video_height * (1 - BOTTOM_MARGIN_FRACTION))
+        y_position = bottom_anchor_y - (caption_y_offset or 0)
 
         return x_position, y_position
 
@@ -672,7 +712,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     if timestamps:
         number_of_timestamps = len(timestamps)
 
-    font_scale = calculate_font_scale(crop_width)
+    font_scale = calculate_font_scale(crop_width, crop_height, settings.caption)
 
     # Pre-compute caption layout once. The caption text and font scale don't
     # change frame-to-frame, so measuring inside the render loop would be
@@ -729,7 +769,10 @@ def process_video(original_video_path: str, output_video_path: str = None, times
             frame_position = vid.get(cv2.CAP_PROP_POS_FRAMES)
             current_timestamp = timestamps[int(frame_position / total_frames * (number_of_timestamps - 1))]
             timestamp_string = current_timestamp.strftime('%Y-%m-%d %H:%M:%S')
-            x_pos, y_pos = calculate_xy_text_position(crop_height, crop_width, timestamp_string, font_scale)
+            x_pos, y_pos = calculate_xy_text_position(
+                crop_height, crop_width, timestamp_string, font_scale,
+                caption_y_offset=caption_y_offset,
+            )
             cv2.putText(finished_frame, timestamp_string, (x_pos, y_pos), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), settings.font_weight, cv2.LINE_AA)
             if settings.caption:
                 cv2.putText(
