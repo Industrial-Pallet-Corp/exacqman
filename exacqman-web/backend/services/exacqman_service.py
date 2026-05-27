@@ -98,11 +98,10 @@ class ExtractFailure(Exception):
     DEFAULT_FRIENDLY_MESSAGE = "Video extraction failed: internal error"
 
     _CATEGORIES = {
-        # configuration bucket -- something the user can fix by
-        # adjusting their config / credentials / request inputs.
+        # configuration bucket -- something the user can fix
         "ConfigError":      "Video extraction failed: configuration problem",
-        "CredentialsError": "Video extraction failed: configuration problem",
-        "CaptionTooLong":   "Video extraction failed: configuration problem",
+        "CredentialsError": "Video extraction failed: authentication problem",
+        "CaptionTooLong":   "Video extraction failed: caption too long",
         # server bucket -- the camera (exacqvision) server itself.
         "ExacqvisionError": "Video extraction failed: couldn't reach the camera server",
         # processing bucket -- local video decode / transform failure.
