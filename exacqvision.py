@@ -1,11 +1,16 @@
-import requests, json
+import argparse
+import json
+import sys
 from pathlib import Path
-from requests.exceptions import RequestException
 from time import sleep
 from datetime import datetime, timedelta
+from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from progress import get_reporter
+import requests
+from requests.exceptions import RequestException
+
+from progress import init_reporter, get_reporter
 
 
 class ExacqvisionError(Exception):
@@ -404,4 +409,384 @@ class Exacqvision:
         finished_timestamps = [x for x in unique_timestamps if x >= start and x <= stop]
 
         return finished_timestamps
-    
+
+
+# ---------------------------------------------------------------------------
+# CLI entrypoint
+# ---------------------------------------------------------------------------
+#
+# `exacqvision.py` doubles as a small command-line utility for inspecting the
+# server it wraps. The first action is `--list-cameras`; future actions
+# (`--list-servers`, `--ping`, etc.) can slot in alongside it without
+# changing the surrounding wiring.
+#
+# The CLI is intentionally a thin layer: it reuses the same TOML config +
+# credentials conventions as `exacqman.py` (via `exacqman_config`) and the
+# same progress reporter (so validation errors look identical across the two
+# CLIs). The library half above is untouched -- importing this module from
+# `exacqman.py` continues to work exactly as before.
+
+
+# Exacqvision documents a status enum used across event / status fields
+# (see "Event Type" tables in the API doc). The camera's `state` field is
+# documented only by example; in practice 0 means "operating normally" and
+# any of the documented disconnect codes mean "not currently capturing".
+# We surface a small, stable vocabulary in the table -- OK / OFFLINE /
+# DISABLED -- and fall back to the raw integer for any code not in the
+# disconnect set, so unknown codes are loud rather than silently bucketed.
+_DISCONNECT_STATE_CODES = {6, 13, 14, 18, 19, 21}
+
+
+def _decode_camera_state(camera: dict) -> str:
+    """Map a camera entry's `disabled` + `state` ints to a short label.
+
+    `disabled == 1` short-circuits to ``DISABLED`` because an administratively
+    disabled camera is a different condition from a temporarily unreachable
+    one and conflating them would mask config issues.
+    """
+    if camera.get("disabled") == 1:
+        return "DISABLED"
+    state = camera.get("state")
+    if state == 0:
+        return "OK"
+    if state in _DISCONNECT_STATE_CODES:
+        return "OFFLINE"
+    return f"state={state}" if state is not None else "?"
+
+
+def _camera_resolution(camera: dict) -> str:
+    """Format the `resolution` sub-dict as ``WIDTHxHEIGHT`` for the table."""
+    res = camera.get("resolution") or {}
+    w, h = res.get("width"), res.get("height")
+    if isinstance(w, int) and isinstance(h, int):
+        return f"{w}x{h}"
+    return "--"
+
+
+def _camera_fps(camera: dict) -> str:
+    """Format the `frameRate` field, or `--` for missing/non-numeric values."""
+    rate = camera.get("frameRate")
+    return str(rate) if isinstance(rate, int) and rate > 0 else "--"
+
+
+def _alias_for_camera_id(
+    cam_id: int,
+    server_cameras_config: dict,
+) -> str:
+    """Reverse-lookup the local alias for a server-reported camera ID.
+
+    `server_cameras_config` is the ``[servers.<srv>.cameras]`` table for the
+    active server, shaped as ``{alias: {"id": int, ...}}``. Returns ``"--"``
+    when the server reports a camera that isn't wired up in the local config
+    -- that's the discovery use case ("what's on the server that we haven't
+    added yet?").
+    """
+    for alias, cam_data in (server_cameras_config or {}).items():
+        if isinstance(cam_data, dict) and cam_data.get("id") == cam_id:
+            return str(alias)
+    return "--"
+
+
+def _format_camera_table(
+    cameras: list[dict],
+    local_cameras: dict,
+) -> str:
+    """Render one server's cameras as an aligned ASCII table.
+
+    Columns: ID, Local alias, Remote alias, State, Resolution, FPS.
+    Widths are computed per-call so each section stays tight; we don't try
+    to keep widths consistent across servers because a wide alias in one
+    group shouldn't force every other group to pad to match.
+    """
+    headers = ("ID", "Local alias", "Remote alias", "State", "Resolution", "FPS")
+    rows: list[tuple[str, ...]] = [headers]
+    for cam in cameras:
+        rows.append((
+            str(cam.get("id", "?")),
+            _alias_for_camera_id(cam.get("id"), local_cameras),
+            str(cam.get("name", "")),
+            _decode_camera_state(cam),
+            _camera_resolution(cam),
+            _camera_fps(cam),
+        ))
+
+    widths = [max(len(row[i]) for row in rows) for i in range(len(headers))]
+
+    def render(row: tuple[str, ...]) -> str:
+        return "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
+
+    return "\n".join(render(row) for row in rows)
+
+
+def _enrich_camera_for_json(camera: dict, local_cameras: dict) -> dict:
+    """Return a copy of the API camera dict with derived fields added.
+
+    Adds:
+      - ``local_alias``: the alias under ``[servers.<srv>.cameras]`` whose
+        ``id`` matches this camera, or ``None`` if no local config entry.
+      - ``state_label``: the same OK / OFFLINE / DISABLED / state=N string
+        the table column shows, so machine consumers don't have to
+        re-implement the status decode.
+    Raw API fields pass through untouched.
+    """
+    enriched = dict(camera)
+    alias = _alias_for_camera_id(camera.get("id"), local_cameras)
+    enriched["local_alias"] = None if alias == "--" else alias
+    enriched["state_label"] = _decode_camera_state(camera)
+    return enriched
+
+
+def _resolve_servers_to_query(
+    config: dict,
+    cli_server: str | None,
+) -> list[str]:
+    """Decide which servers in the config to query.
+
+    Priority (matches `extract` subcommand semantics):
+      1. ``--server`` on the CLI.
+      2. ``[runtime].server`` in the config.
+      3. All servers declared under ``[servers]`` -- the discovery default.
+
+    Exits with a clear error if ``--server`` references a name that isn't
+    in the config; that's a typo we can catch before any HTTP traffic.
+    """
+    servers_table = config.get("servers", {}) or {}
+    if cli_server:
+        if cli_server not in servers_table:
+            get_reporter().error(
+                "ConfigError",
+                (
+                    f"--server {cli_server!r} is not declared under [servers] "
+                    f"in the config. Available: {sorted(servers_table.keys())}"
+                ),
+            )
+            sys.exit(1)
+        return [cli_server]
+
+    runtime = config.get("runtime", {}) or {}
+    runtime_server = runtime.get("server") if isinstance(runtime, dict) else None
+    if runtime_server and runtime_server in servers_table:
+        return [runtime_server]
+
+    # Multi-server discovery default: iterate over everything declared.
+    return list(servers_table.keys())
+
+
+def _list_cameras_for_servers(
+    servers: Iterable[str],
+    config: dict,
+    auth: dict,
+    timezone: ZoneInfo,
+) -> list[dict]:
+    """Login to each server in turn, list its cameras, and collect the result.
+
+    Each server's connect / list / logout is wrapped in its own try block so
+    one unreachable server doesn't tank the entire listing. Per-server
+    failures surface as ``warning`` reporter events with a ``cameras: []``
+    entry in the returned structure, letting callers render an empty
+    section rather than dropping the server silently.
+    """
+    servers_table = config.get("servers", {}) or {}
+    out: list[dict] = []
+    for srv_name in servers:
+        srv_data = servers_table.get(srv_name) or {}
+        url = srv_data.get("url")
+        local_cameras = srv_data.get("cameras") or {}
+        entry: dict = {
+            "server": srv_name,
+            "url": url,
+            "cameras": [],
+            "error": None,
+        }
+
+        if not url:
+            entry["error"] = "no url configured"
+            out.append(entry)
+            continue
+
+        api = None
+        try:
+            api = Exacqvision(url, auth["username"], auth["password"], timezone)
+            raw_cameras = api.list_cameras()
+            entry["cameras"] = [
+                _enrich_camera_for_json(cam, local_cameras) for cam in raw_cameras
+            ]
+        except (RequestException, ExacqvisionError, ValueError, KeyError) as exc:
+            entry["error"] = str(exc)
+            get_reporter().warning(
+                f"Failed to list cameras on server '{srv_name}' ({url}): {exc}"
+            )
+        finally:
+            if api is not None:
+                try:
+                    api.logout()
+                except Exception:
+                    # Logout is best-effort; a server that's already returned
+                    # a list isn't going to hold session state long enough
+                    # for the leak to matter.
+                    pass
+
+        out.append(entry)
+    return out
+
+
+def _emit_camera_table(results: list[dict], config: dict) -> None:
+    """Print the human-readable table form of `_list_cameras_for_servers` output."""
+    servers_table = config.get("servers", {}) or {}
+    sections: list[str] = []
+    for entry in results:
+        header = f"Server: {entry['server']}  {entry['url'] or '(no url)'}"
+        if entry.get("error"):
+            sections.append(f"{header}\n  Error: {entry['error']}")
+            continue
+        if not entry["cameras"]:
+            sections.append(f"{header}\n  (no cameras reported)")
+            continue
+        local_cameras = (servers_table.get(entry["server"]) or {}).get("cameras") or {}
+        # _enrich_camera_for_json adds derived fields but leaves the raw
+        # ones in place, so the table formatter can read the same dict.
+        table = _format_camera_table(entry["cameras"], local_cameras)
+        sections.append(f"{header}\n{table}")
+    print("\n\n".join(sections))
+
+
+def _emit_camera_json(results: list[dict]) -> None:
+    """Print the JSON form -- a list of {server, url, cameras, error} objects."""
+    print(json.dumps(results, indent=2, sort_keys=False))
+
+
+def parse_arguments() -> argparse.Namespace:
+    """Define the CLI surface for `exacqvision.py`.
+
+    Modeled after `exacqman.py`'s `extract` subcommand so the flags carry
+    the same meaning across the two CLIs (positional config + ``--config``
+    + ``--credentials`` + ``--server``). The action is in a mutually-
+    exclusive group so future utility actions (``--list-servers``, etc.)
+    can be added without breaking the contract.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Inspect an Exacqvision server. Currently supports listing "
+            "cameras; future utility actions can be added alongside "
+            "--list-cameras."
+        ),
+    )
+    parser.add_argument(
+        "config_file",
+        nargs="?",
+        default=None,
+        help=(
+            "Path to the TOML config file (same format as exacqman.py). "
+            "Alternatively, pass --config."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        dest="config_flag",
+        default=None,
+        help="Flag-form alternative to the positional config_file.",
+    )
+    parser.add_argument(
+        "--credentials",
+        default=None,
+        help=(
+            "Path to TOML credentials file. Overrides settings.credentials_file "
+            "in the config."
+        ),
+    )
+    parser.add_argument(
+        "--server",
+        default=None,
+        help=(
+            "Restrict the query to one server (must match a key under [servers] "
+            "in the config). Default: query every server declared in the config."
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        dest="as_json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of the default text table.",
+    )
+
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument(
+        "--list-cameras",
+        dest="list_cameras",
+        action="store_true",
+        help="List all cameras on the resolved server(s).",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    """Entrypoint for `python exacqvision.py ...`."""
+    # Local import to avoid forcing the library half of this module to pull
+    # in tomllib / config validation just for `from exacqvision import
+    # Exacqvision`. The CLI half is the only consumer.
+    from exacqman_config import (
+        import_config,
+        import_credentials,
+        resolve_credentials_path,
+    )
+
+    args = parse_arguments()
+
+    # Human reporter -- this is an interactive CLI utility, not a pipeline
+    # action with structured progress to consume. Errors / warnings still
+    # flow through the same reporter so config-validation failures look
+    # identical to exacqman.py's.
+    init_reporter(format="human", quiet=False)
+
+    config_path = args.config_file or args.config_flag
+    if args.config_file and args.config_flag and args.config_file != args.config_flag:
+        get_reporter().error(
+            "ConfigError",
+            (
+                "Both positional config_file and --config were given with "
+                f"different values ({args.config_file!r} vs {args.config_flag!r}); "
+                "specify only one."
+            ),
+        )
+        sys.exit(1)
+    if not config_path:
+        get_reporter().error(
+            "ConfigError",
+            (
+                "No config file specified. Pass one positionally or via --config "
+                "(same format as exacqman.py's config file)."
+            ),
+        )
+        sys.exit(1)
+
+    config = import_config(config_path)
+    credentials_path = resolve_credentials_path(config_path, config, args.credentials)
+    auth = import_credentials(credentials_path)
+
+    settings_table = config.get("settings", {}) or {}
+    timezone_name = settings_table.get("timezone")
+    # `validate_config` already enforced that this is a non-empty string,
+    # but ZoneInfo's failure mode (ZoneInfoNotFoundError on an unknown name)
+    # is still worth surfacing through the reporter rather than a raw
+    # traceback.
+    try:
+        timezone = ZoneInfo(timezone_name)
+    except Exception as exc:
+        get_reporter().error(
+            "ConfigError",
+            f"settings.timezone {timezone_name!r} is not a valid IANA zone: {exc}",
+        )
+        sys.exit(1)
+
+    if args.list_cameras:
+        servers = _resolve_servers_to_query(config, args.server)
+        results = _list_cameras_for_servers(servers, config, auth, timezone)
+        if args.as_json:
+            _emit_camera_json(results)
+        else:
+            _emit_camera_table(results, config)
+
+
+if __name__ == "__main__":
+    main()

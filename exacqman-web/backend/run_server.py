@@ -10,7 +10,7 @@ releases the port.
 
 For development, pass ``--reload`` to enable uvicorn's autoreload mode.
 Note: reload mode spawns a watcher parent plus a worker child that both
-inherit the listening socket, so a clean shutdown requires signalling the
+inherit the listening socket, so a clean shutdown requires signaling the
 parent (the worker is supervised). Stick with the default for any
 non-iterative workflow.
 """

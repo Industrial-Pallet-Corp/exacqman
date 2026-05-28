@@ -361,7 +361,7 @@ class JobQueue:
                     if self._waiting:
                         self._wakeup.set()
         except asyncio.CancelledError:
-            logger.info("JobQueue worker cancelled")
+            logger.info("JobQueue worker canceled")
             raise
 
     async def _run_job(self, job: Job) -> None:
