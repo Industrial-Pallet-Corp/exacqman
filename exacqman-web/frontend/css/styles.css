@@ -9,14 +9,14 @@
     --brand-green: rgb(47, 120, 80);
     --brand-green-dark: rgb(35, 90, 60);
     --brand-green-light: rgb(59, 150, 100);
-    --brand-grey: rgb(69, 65, 66);
-    --brand-grey-dark: rgb(50, 45, 46);
-    --brand-grey-light: rgb(88, 85, 86);
+    --brand-gray: rgb(69, 65, 66);
+    --brand-gray-dark: rgb(50, 45, 46);
+    --brand-gray-light: rgb(88, 85, 86);
     
     /* UI Colors (using brand palette) */
     --primary-color: var(--brand-burgundy);
     --primary-hover: var(--brand-burgundy-dark);
-    --secondary-color: var(--brand-grey);
+    --secondary-color: var(--brand-gray);
     --success-color: var(--brand-green);
     --warning-color: #f59e0b;
     --error-color: #ef4444;

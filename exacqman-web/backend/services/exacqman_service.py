@@ -209,7 +209,7 @@ class ExacqManService:
             )
 
             # The finally block guarantees the child is reaped even when
-            # this coroutine is cancelled mid-extract (e.g. during server
+            # this coroutine is canceled mid-extract (e.g. during server
             # shutdown). Without it, SIGTERM to the web server would leave
             # an orphan ffmpeg / download running in the background.
             try:
@@ -296,9 +296,9 @@ class ExacqManService:
 
         Normal happy-path completion has ``returncode`` already set and this
         is a no-op. The interesting case is when our coroutine is being
-        cancelled (server shutting down, request aborted) -- the CLI is
+        canceled (server shutting down, request aborted) -- the CLI is
         still running, *and* the CLI itself has typically forked an ffmpeg
-        and/or an exacqvision download in progress. Just signalling the
+        and/or an exacqvision download in progress. Just signaling the
         CLI alone leaks those grandchildren as orphans reparented to init.
 
         On POSIX we use the standard "kill the whole process group" trick:
@@ -309,7 +309,7 @@ class ExacqManService:
         exited (a slow ffmpeg trying to flush, a wedged network read).
 
         On Windows process groups work differently and ``os.killpg`` /
-        ``os.getpgid`` don't exist, so we fall back to signalling the CLI
+        ``os.getpgid`` don't exist, so we fall back to signaling the CLI
         process directly via ``process.terminate()`` / ``process.kill()``.
         Web service operations on Windows won't get the orphan-cleanup
         benefit, but the module still imports and the immediate process
