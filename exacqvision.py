@@ -596,7 +596,6 @@ def _enrich_camera_for_json(camera: dict, local_cameras: dict) -> dict:
 
 
 def _resolve_servers_to_query(
-    config: dict,
     cameras_by_server: dict,
     cli_server: str | None,
 ) -> list[str]:
@@ -604,8 +603,7 @@ def _resolve_servers_to_query(
 
     Priority (matches `extract` subcommand semantics):
       1. ``--server`` on the CLI.
-      2. ``[runtime].server`` in the config.
-      3. Every declared server -- the discovery default.
+      2. Every declared server -- the discovery default.
 
     ``cameras_by_server`` is keyed by every declared server table name (the
     ``[<server>]`` tables), so its keys are the full set of known servers.
@@ -624,11 +622,6 @@ def _resolve_servers_to_query(
             )
             sys.exit(1)
         return [cli_server]
-
-    runtime = config.get("runtime", {}) or {}
-    runtime_server = runtime.get("server") if isinstance(runtime, dict) else None
-    if runtime_server and runtime_server in cameras_by_server:
-        return [runtime_server]
 
     # Multi-server discovery default: iterate over everything declared.
     return server_names
@@ -842,7 +835,7 @@ def main() -> None:
 
     if args.list_cameras:
         servers_by_name, cameras_by_server = split_servers_and_cameras(config)
-        servers = _resolve_servers_to_query(config, cameras_by_server, args.server)
+        servers = _resolve_servers_to_query(cameras_by_server, args.server)
         results = _list_cameras_for_servers(
             servers, servers_by_name, cameras_by_server, auth, timezone
         )
