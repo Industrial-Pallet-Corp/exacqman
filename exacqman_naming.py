@@ -76,8 +76,8 @@ def default_output_stem(
         server: Server alias the camera lives under, e.g. ``"gpa"``.
             Falls back to ``"unknown"`` if ``None`` so the stem stays
             parseable for CLI-only ad-hoc runs.
-        camera_alias: Camera alias as configured under
-            ``[servers.<server>.cameras]``.
+        camera_alias: Camera alias as configured in the ``[<server>.<alias>]``
+            table.
         multiplier: Timelapse multiplier (e.g. ``50`` for 50x).
 
     Returns:

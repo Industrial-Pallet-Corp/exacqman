@@ -475,11 +475,11 @@ def _alias_for_camera_id(
 ) -> str:
     """Reverse-lookup the local alias for a server-reported camera ID.
 
-    `server_cameras_config` is the ``[servers.<srv>.cameras]`` table for the
-    active server, shaped as ``{alias: {"id": int, ...}}``. Returns ``"--"``
-    when the server reports a camera that isn't wired up in the local config
-    -- that's the discovery use case ("what's on the server that we haven't
-    added yet?").
+    `server_cameras_config` is the active server's camera map -- the
+    dict-valued ``[<server>.<alias>]`` sub-tables, shaped as
+    ``{alias: {"id": int, ...}}``. Returns ``"--"`` when the server reports a
+    camera that isn't wired up in the local config -- that's the discovery use
+    case ("what's on the server that we haven't added yet?").
     """
     for alias, cam_data in (server_cameras_config or {}).items():
         if isinstance(cam_data, dict) and cam_data.get("id") == cam_id:
@@ -522,7 +522,7 @@ def _enrich_camera_for_json(camera: dict, local_cameras: dict) -> dict:
     """Return a copy of the API camera dict with derived fields added.
 
     Adds:
-      - ``local_alias``: the alias under ``[servers.<srv>.cameras]`` whose
+      - ``local_alias``: the alias of the ``[<server>.<alias>]`` table whose
         ``id`` matches this camera, or ``None`` if no local config entry.
       - ``state_label``: the same OK / OFFLINE / DISABLED / state=N string
         the table column shows, so machine consumers don't have to
@@ -538,6 +538,7 @@ def _enrich_camera_for_json(camera: dict, local_cameras: dict) -> dict:
 
 def _resolve_servers_to_query(
     config: dict,
+    cameras_by_server: dict,
     cli_server: str | None,
 ) -> list[str]:
     """Decide which servers in the config to query.
@@ -545,19 +546,21 @@ def _resolve_servers_to_query(
     Priority (matches `extract` subcommand semantics):
       1. ``--server`` on the CLI.
       2. ``[runtime].server`` in the config.
-      3. All servers declared under ``[servers]`` -- the discovery default.
+      3. Every declared server -- the discovery default.
 
+    ``cameras_by_server`` is keyed by every declared server table name (the
+    ``[<server>]`` tables), so its keys are the full set of known servers.
     Exits with a clear error if ``--server`` references a name that isn't
     in the config; that's a typo we can catch before any HTTP traffic.
     """
-    servers_table = config.get("servers", {}) or {}
+    server_names = list(cameras_by_server.keys())
     if cli_server:
-        if cli_server not in servers_table:
+        if cli_server not in cameras_by_server:
             get_reporter().error(
                 "ConfigError",
                 (
-                    f"--server {cli_server!r} is not declared under [servers] "
-                    f"in the config. Available: {sorted(servers_table.keys())}"
+                    f"--server {cli_server!r} is not declared as a [<server>] table "
+                    f"in the config. Available: {sorted(server_names)}"
                 ),
             )
             sys.exit(1)
@@ -565,16 +568,17 @@ def _resolve_servers_to_query(
 
     runtime = config.get("runtime", {}) or {}
     runtime_server = runtime.get("server") if isinstance(runtime, dict) else None
-    if runtime_server and runtime_server in servers_table:
+    if runtime_server and runtime_server in cameras_by_server:
         return [runtime_server]
 
     # Multi-server discovery default: iterate over everything declared.
-    return list(servers_table.keys())
+    return server_names
 
 
 def _list_cameras_for_servers(
     servers: Iterable[str],
-    config: dict,
+    servers_by_name: dict,
+    cameras_by_server: dict,
     auth: dict,
     timezone: ZoneInfo,
 ) -> list[dict]:
@@ -586,12 +590,10 @@ def _list_cameras_for_servers(
     entry in the returned structure, letting callers render an empty
     section rather than dropping the server silently.
     """
-    servers_table = config.get("servers", {}) or {}
     out: list[dict] = []
     for srv_name in servers:
-        srv_data = servers_table.get(srv_name) or {}
-        url = srv_data.get("url")
-        local_cameras = srv_data.get("cameras") or {}
+        url = servers_by_name.get(srv_name)
+        local_cameras = cameras_by_server.get(srv_name) or {}
         entry: dict = {
             "server": srv_name,
             "url": url,
@@ -630,9 +632,8 @@ def _list_cameras_for_servers(
     return out
 
 
-def _emit_camera_table(results: list[dict], config: dict) -> None:
+def _emit_camera_table(results: list[dict], cameras_by_server: dict) -> None:
     """Print the human-readable table form of `_list_cameras_for_servers` output."""
-    servers_table = config.get("servers", {}) or {}
     sections: list[str] = []
     for entry in results:
         header = f"Server: {entry['server']}  {entry['url'] or '(no url)'}"
@@ -642,7 +643,7 @@ def _emit_camera_table(results: list[dict], config: dict) -> None:
         if not entry["cameras"]:
             sections.append(f"{header}\n  (no cameras reported)")
             continue
-        local_cameras = (servers_table.get(entry["server"]) or {}).get("cameras") or {}
+        local_cameras = cameras_by_server.get(entry["server"]) or {}
         # _enrich_camera_for_json adds derived fields but leaves the raw
         # ones in place, so the table formatter can read the same dict.
         table = _format_camera_table(entry["cameras"], local_cameras)
@@ -698,8 +699,8 @@ def parse_arguments() -> argparse.Namespace:
         "--server",
         default=None,
         help=(
-            "Restrict the query to one server (must match a key under [servers] "
-            "in the config). Default: query every server declared in the config."
+            "Restrict the query to one server (must match a top-level [<server>] "
+            "table in the config). Default: query every server declared in the config."
         ),
     )
     parser.add_argument(
@@ -729,6 +730,7 @@ def main() -> None:
         import_config,
         import_credentials,
         resolve_credentials_path,
+        split_servers_and_cameras,
     )
 
     args = parse_arguments()
@@ -780,12 +782,15 @@ def main() -> None:
         sys.exit(1)
 
     if args.list_cameras:
-        servers = _resolve_servers_to_query(config, args.server)
-        results = _list_cameras_for_servers(servers, config, auth, timezone)
+        servers_by_name, cameras_by_server = split_servers_and_cameras(config)
+        servers = _resolve_servers_to_query(config, cameras_by_server, args.server)
+        results = _list_cameras_for_servers(
+            servers, servers_by_name, cameras_by_server, auth, timezone
+        )
         if args.as_json:
             _emit_camera_json(results)
         else:
-            _emit_camera_table(results, config)
+            _emit_camera_table(results, cameras_by_server)
 
 
 if __name__ == "__main__":

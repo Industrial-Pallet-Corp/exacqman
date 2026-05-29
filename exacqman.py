@@ -11,6 +11,7 @@ from exacqman_config import (
     import_config,
     import_credentials,
     resolve_credentials_path,
+    split_servers_and_cameras,
     validate_config,
     validate_credentials,
 )
@@ -59,9 +60,9 @@ class Settings:
     caption: str = None                 # Optional caption rendered below the timestamp
     caption_limit = 30                  # Max number of characters for caption
 
-    server: str = None                  # Server name (must match a key under [servers])
+    server: str = None                  # Server name (must match a top-level [<server>] table)
     server_ip: str = None               # URL of the chosen Exacqvision server
-    camera_alias: str = None            # Camera alias (must match a [servers.<server>.cameras.<alias>] entry)
+    camera_alias: str = None            # Camera alias (must match a [<server>.<alias>] entry)
     camera_id: int = None               # Camera ID resolved from the chosen alias on the chosen server
     input_filename: str = None          # Video filename that needs processed
     output_filename: str = None         # Desired name of output file (will always be .mp4)
@@ -106,31 +107,22 @@ class Settings:
             return None
 
         auth = auth or {}
-        servers_table = config.get('servers', {})
         settings_table = config.get('settings', {})
         runtime = config.get('runtime', {})
 
-        # Build the flat name->url map and the nested cameras-by-server map.
-        # Per-camera crop dimensions are normalized to tuple-of-tuples so the
-        # rest of the code can keep treating crop_dimensions as a tuple.
-        servers_by_name: dict[str, str] = {}
+        # Build the flat name->url map and the nested cameras-by-server map via
+        # the shared schema helper, then normalize per-camera crop dimensions to
+        # tuple-of-tuples so the rest of the code can keep treating
+        # crop_dimensions as a tuple.
+        servers_by_name, raw_cameras_by_server = split_servers_and_cameras(config)
         cameras_by_server: dict[str, dict[str, dict]] = {}
-        for srv_name, srv_data in servers_table.items():
-            if not isinstance(srv_data, dict):
-                continue
-            url = srv_data.get('url')
-            if isinstance(url, str) and url.strip():
-                servers_by_name[srv_name] = url
+        for srv_name, cam_table in raw_cameras_by_server.items():
             cam_map: dict[str, dict] = {}
-            for alias, cam_data in srv_data.get('cameras', {}).items():
-                if not isinstance(cam_data, dict):
-                    continue
+            for alias, cam_data in cam_table.items():
                 entry: dict = {'id': cam_data.get('id')}
                 cam_crop = cam_data.get('crop_dimensions')
                 if cam_crop is not None:
                     entry['crop_dimensions'] = tuple(tuple(pt) for pt in cam_crop)
-                # TOML keys are always strings; explicit str() is defensive for
-                # cases where a caller passes a raw int alias through args.
                 cam_map[str(alias)] = entry
             cameras_by_server[srv_name] = cam_map
 
@@ -355,11 +347,11 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     coords = ((x, y), (w, h))
     # Render the same value in TOML array syntax so users can paste it
     # straight into either [settings].default_crop_dimensions or a
-    # [servers.<server>.cameras.<alias>].crop_dimensions entry.
+    # [<server>.<alias>].crop_dimensions entry.
     toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
 
     # Auto-copy the per-camera crop_dimensions line so the common path
-    # (paste into [servers.<srv>.cameras.<alias>]) is a single cmd-V away.
+    # (paste into [<server>.<alias>]) is a single cmd-V away.
     clip_line = f"crop_dimensions = {toml_coords}"
     copied_suffix = "   (copied to clipboard)" if _copy_to_clipboard(clip_line) else ""
 
@@ -367,7 +359,7 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     # "= ") line up vertically on their first character despite the differing
     # label lengths.
     label_settings = "Under [settings]: default_crop_dimensions"
-    label_camera = "Under [servers.<srv>.cameras.<alias>]: crop_dimensions"
+    label_camera = "Under [<server>.<alias>]: crop_dimensions"
     label_width = max(len(label_settings), len(label_camera))
 
     # Leading/trailing newlines frame the result so it stands out from the
@@ -387,14 +379,14 @@ def _write_crop_to_config(
     camera_alias: str,
     toml_coords: str,
 ) -> tuple[bool, str]:
-    """Insert or update crop_dimensions under [servers.<server>.cameras.<alias>].
+    """Insert or update crop_dimensions under [<server>.<alias>].
 
     Edits the config file textually (tomllib is read-only) and validates that
     the result still parses as TOML *before* writing -- on any problem the file
     is left untouched and a message is returned for the caller to surface.
     Supports the canonical explicit-table form used by default.config:
 
-        [servers.<server>.cameras.<alias>]
+        [<server>.<alias>]
         id = ...
         crop_dimensions = [[x, y], [w, h]]
 
@@ -409,8 +401,8 @@ def _write_crop_to_config(
     lines = original.splitlines(keepends=True)
     # The alias is a TOML key; it may appear bare or quoted in the header.
     candidate_headers = {
-        f"[servers.{server}.cameras.{camera_alias}]",
-        f'[servers.{server}.cameras."{camera_alias}"]',
+        f"[{server}.{camera_alias}]",
+        f'[{server}."{camera_alias}"]',
     }
     header_idx = next(
         (i for i, ln in enumerate(lines) if ln.strip() in candidate_headers),
@@ -418,7 +410,7 @@ def _write_crop_to_config(
     )
     if header_idx is None:
         return False, (
-            f"Could not locate [servers.{server}.cameras.{camera_alias}] in "
+            f"Could not locate [{server}.{camera_alias}] in "
             f"{path.name}; left it unchanged (the line is on your clipboard to paste)."
         )
 
@@ -463,7 +455,7 @@ def _write_crop_to_config(
 
     verb = "Updated" if existing_idx is not None else "Added"
     return True, (
-        f"{verb} crop_dimensions in [servers.{server}.cameras.{camera_alias}] of {path.name}."
+        f"{verb} crop_dimensions in [{server}.{camera_alias}] of {path.name}."
     )
 
 
@@ -830,7 +822,7 @@ def parse_arguments():
             'in the config. One of the two must be set.'
         ),
     )
-    extract_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file)')
+    extract_parser.add_argument('--server', type=str, help='Server name (must match a top-level [<server>] table in the config file)')
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
     extract_parser.add_argument(
         '--output-dir',
@@ -876,7 +868,7 @@ def parse_arguments():
         'crop',
         help='Grab a recent frame and pick crop dimensions for a camera (CLI-only).',
     )
-    crop_parser.add_argument('camera_alias', type=str, help='Camera alias (must match a [servers.<srv>.cameras.<alias>] entry).')
+    crop_parser.add_argument('camera_alias', type=str, help='Camera alias (must match a [<server>.<alias>] entry).')
     crop_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
     crop_parser.add_argument(
         '--config',
@@ -891,7 +883,7 @@ def parse_arguments():
         default=None,
         help='Path to TOML credentials file. Overrides settings.credentials_file in the config.',
     )
-    crop_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file).')
+    crop_parser.add_argument('--server', type=str, help='Server name (must match a top-level [<server>] table in the config file).')
     crop_parser.add_argument(
         '--lookback-minutes',
         type=int,
@@ -1420,15 +1412,15 @@ def main():
             if not settings.server_ip:
                 reporter.error(
                     "ConfigError",
-                    f'Server "{settings.server}" is not defined under [servers] in the config.',
+                    f'Server "{settings.server}" is not defined as a top-level [<server>] table in the config.',
                 )
                 exit(1)
             if not settings.camera_id:
                 reporter.error(
                     "ConfigError",
                     (
-                        f'Camera alias "{settings.camera_alias}" is not defined under '
-                        f'[servers.{settings.server}.cameras] in the config.'
+                        f'Camera alias "{settings.camera_alias}" is not defined as a '
+                        f'[{settings.server}.{settings.camera_alias}] table in the config.'
                     ),
                 )
                 exit(1)

@@ -4,10 +4,16 @@ Configuration Service
 Reads ExacqMan TOML configuration files for the web application.
 
 The CLI tool (``exacqman.py``) consumes the same config files, so this module
-mirrors its structure expectations: lowercase top-level tables (``[servers]``,
-``[settings]``, ``[runtime]``), and per-server camera tables under
-``[servers.<server>.cameras.<alias>]``. Authentication is loaded from a
-separate credentials file by the CLI (see ``sample.credentials``).
+mirrors its structure expectations: ``[settings]`` and ``[runtime]`` are
+reserved top-level tables, and every other top-level table is a server. A
+server table holds a scalar ``url`` and dict-valued camera sub-tables
+(``[<server>.<alias>]``). Authentication is loaded from a separate credentials
+file by the CLI (see ``sample.credentials``).
+
+This module deliberately re-implements the tiny server/camera split rule rather
+than importing the root ``exacqman_config`` helper, since the web backend runs
+as its own package; the rule below must stay in lockstep with
+``exacqman_config.split_servers_and_cameras``.
 """
 
 import logging
@@ -18,6 +24,18 @@ from typing import Dict, List, Optional
 from api.models import CameraInfo, ConfigInfo
 
 logger = logging.getLogger(__name__)
+
+# Top-level tables that are NOT servers (mirror of
+# exacqman_config.RESERVED_TABLES).
+RESERVED_TABLES = frozenset({"settings", "runtime"})
+
+
+def _iter_server_tables(config: dict):
+    """Yield ``(server_name, server_table)`` for each non-reserved top-level table."""
+    for name, table in (config or {}).items():
+        if name in RESERVED_TABLES or not isinstance(table, dict):
+            continue
+        yield name, table
 
 
 class ConfigService:
@@ -58,19 +76,11 @@ class ConfigService:
         """
         try:
             config = self._load(config_file)
-            servers_table = config.get("servers", {})
-            if not isinstance(servers_table, dict) or not servers_table:
-                logger.warning("No [servers] table found in %s", config_file)
-                return []
 
             cameras: List[CameraInfo] = []
-            for srv_name, srv_data in servers_table.items():
-                if not isinstance(srv_data, dict):
-                    continue
-                cams = srv_data.get("cameras", {})
-                if not isinstance(cams, dict):
-                    continue
-                for alias, cam_data in cams.items():
+            for srv_name, srv_data in _iter_server_tables(config):
+                # Dict-valued sub-tables are cameras; the scalar `url` is skipped.
+                for alias, cam_data in srv_data.items():
                     if not isinstance(cam_data, dict):
                         continue
                     cam_id = cam_data.get("id")
@@ -83,6 +93,8 @@ class ConfigService:
                         server=srv_name,
                     ))
 
+            if not cameras:
+                logger.warning("No cameras found in %s", config_file)
             logger.info("Loaded %d cameras from %s", len(cameras), config_file)
             return cameras
 
@@ -94,19 +106,15 @@ class ConfigService:
         """Return a flat ``{server_name: url}`` map."""
         try:
             config = self._load(config_file)
-            servers_table = config.get("servers", {})
-            if not isinstance(servers_table, dict) or not servers_table:
-                logger.warning("No [servers] table found in %s", config_file)
-                return {}
 
             servers: Dict[str, str] = {}
-            for srv_name, srv_data in servers_table.items():
-                if not isinstance(srv_data, dict):
-                    continue
+            for srv_name, srv_data in _iter_server_tables(config):
                 url = srv_data.get("url")
                 if isinstance(url, str) and url.strip():
                     servers[srv_name] = url
 
+            if not servers:
+                logger.warning("No servers found in %s", config_file)
             logger.info("Loaded %d servers from %s", len(servers), config_file)
             return servers
 
@@ -165,10 +173,10 @@ class ConfigService:
             return []
 
     def validate_config_file(self, config_file: str) -> bool:
-        """Lightweight structural check: file exists, parses as TOML, has the
-        required top-level tables. Deeper semantic validation lives in the
-        CLI (``exacqman.validate_config``) and runs when an extract job
-        actually executes.
+        """Lightweight structural check: file exists, parses as TOML, has a
+        ``[settings]`` table and at least one server table. Deeper semantic
+        validation lives in the CLI (``exacqman.validate_config``) and runs
+        when an extract job actually executes.
         """
         try:
             config = self._load(config_file)
@@ -181,5 +189,6 @@ class ConfigService:
             logger.exception("Error validating config file %s", config_file)
             return False
 
-        required_tables = ["servers", "settings"]
-        return all(isinstance(config.get(t), dict) for t in required_tables)
+        if not isinstance(config.get("settings"), dict):
+            return False
+        return any(True for _ in _iter_server_tables(config))

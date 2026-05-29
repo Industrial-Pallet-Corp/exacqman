@@ -92,13 +92,13 @@ python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c]
 python exacqman.py crop camera_alias [config_file] [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
 ```
 
-Grabs a short clip from approximately the current moment, opens the interactive ROI selector on its first frame, and prints the selected crop dimensions in TOML-paste-ready form (both a `crop_dimensions` line for `[servers.<srv>.cameras.<alias>]` and a `default_crop_dimensions` line for `[settings]`). It performs no timelapse, compression, or file output -- it is a quick way to capture crop dimensions for each camera.
+Grabs a short clip from approximately the current moment, opens the interactive ROI selector on its first frame, and prints the selected crop dimensions in TOML-paste-ready form (both a `crop_dimensions` line for `[<server>.<alias>]` and a `default_crop_dimensions` line for `[settings]`). It performs no timelapse, compression, or file output -- it is a quick way to capture crop dimensions for each camera.
 
-- `camera_alias`: Camera name (must match a `[servers.<srv>.cameras.<alias>]` entry).
+- `camera_alias`: Camera name (must match a `[<server>.<alias>]` entry).
 - `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
 - `--config`: Flag-form alternative to the positional `config_file`.
 - `--credentials`: Path to TOML credentials file. Overrides `settings.credentials_file` in the config.
-- `--server`: Server name (must match a key under `[servers]`). Falls back to `[runtime].server`.
+- `--server`: Server name (must match a top-level `[<server>]` table). Falls back to `[runtime].server`.
 - `--lookback-minutes`: How far back from now to request the probe clip, in minutes (default: 15). Increase this if the camera is motion-triggered and has no recent footage.
 
 Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI window and therefore requires a display.
@@ -124,38 +124,44 @@ Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI w
 
 ## Configuration File
 
-The config file (`default.config` template) is structured as follows:
+The config file (`default.config` template) is a TOML file. Authentication lives in a separate credentials file (see `sample.credentials`). `[settings]` and `[runtime]` are reserved tables; every other top-level table is a server (e.g. `[ch]`, `[gpa]`) with a `url`. Cameras are sub-tables of their server, written as `[<server>.<alias>]`, so the same alias can be reused across servers without ID collisions.
 
-```ini
-[Auth]
-user = your_username
-password = your_password
+```toml
+[settings]
+credentials_file = "default.credentials"
+timezone = "America/Indiana/Indianapolis"
+timelapse_multiplier = 50
+compression_level = "high"
+font_weight = 4
+default_crop_dimensions = [[0, 0], [1920, 1080]]
 
-[Network]
-ch = 192.168.1.100
-ny = 192.168.2.100
+[runtime]
+server = "ch"
+camera_alias = "front_door"
+filename = "output"
+date = "3/11"
+start_time = "6pm"
+end_time = "8pm"
+crop = true
 
-[Cameras]
-front_door = 1
-back_door = 2
+[ch]
+url = "http://192.168.1.100"
 
-[Settings]
-timezone = US/Eastern
-timelapse_multiplier = 10
-compression_level = medium
-crop_dimensions = 
-font_weight = 2
+[ny]
+url = "http://192.168.2.100"
 
-[Runtime]
-server = ch
-camera_alias = front_door
-filename = output.mp4
-date = 3/11
-start_time = 6pm
-end_time = 8pm
+[ch.front_door]
+id = 1
+crop_dimensions = [[624, 14], [666, 766]]
+
+[ch.back_door]
+id = 2
 ```
 
-- Leave `crop_dimensions` blank to select interactively during runtime; the script will output coordinates to copy into the config.
+- Server names must not be `settings` or `runtime` (those tables are reserved), and must not contain `.`.
+- Each server table needs a non-empty `url`; each camera sub-table needs a positive-integer `id`.
+- Omit a camera's `crop_dimensions` to fall back to `[settings].default_crop_dimensions`; omit both to select interactively during runtime (the `crop` subcommand outputs a line you can paste back in).
+- `crop_dimensions` are `[[x, y], [width, height]]` arrays of integers.
 - Ensure `timelapse_multiplier` and `font_weight` are positive integers.
 - `compression_level` must be `low`, `medium`, or `high`.
 
