@@ -21,10 +21,19 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+# Project root (this file lives at the repo root). Scratch files are kept in a
+# project-local, gitignored directory rather than the system temp dir so they
+# never escape the project tree -- handy on locked-down machines and for
+# predictable cleanup.
+PROJECT_ROOT = Path(__file__).resolve().parent
+TEMP_DIR = PROJECT_ROOT / ".tmp"
 
 
 @dataclass
@@ -268,6 +277,32 @@ def fit_to_screen(frame, window_name, screen_width, screen_height):
     return resized_frame, scale
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Best-effort copy of `text` to the OS clipboard; returns True on success.
+
+    Shells out to a platform-native tool so no extra dependency is needed:
+    ``pbcopy`` (macOS), ``clip`` (Windows), or ``xclip``/``xsel`` (Linux/X11).
+    Returns False if none are available or the copy fails -- the clipboard is
+    a convenience, never a hard requirement.
+    """
+    if sys.platform == "darwin":
+        candidates = [["pbcopy"]]
+    elif sys.platform.startswith("win"):
+        candidates = [["clip"]]
+    else:
+        candidates = [
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+        ]
+    for cmd in candidates:
+        try:
+            subprocess.run(cmd, input=text.encode("utf-8"), check=True)
+            return True
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            continue
+    return False
+
+
 def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     """Open the interactive ROI selector on `frame` and return crop dimensions.
 
@@ -303,6 +338,12 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     # Show the resized frame and allow ROI selection
     roi = cv2.selectROI(window_name, frame_with_text, showCrosshair=True, fromCenter=False)
     cv2.destroyAllWindows()  # Close the ROI selection window
+    # On macOS the window is only actually torn down once the GUI event loop
+    # is pumped. Without this the leftover window beachballs whenever the main
+    # thread next blocks (e.g. the crop subcommand's input() prompt), since
+    # nothing is servicing its events. A few waitKey ticks flush the teardown.
+    for _ in range(5):
+        cv2.waitKey(1)
 
     # Scale ROI coordinates back to original resolution
     x, y, w, h = map(int, roi)
@@ -316,13 +357,114 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     # straight into either [settings].default_crop_dimensions or a
     # [servers.<server>.cameras.<alias>].crop_dimensions entry.
     toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
-    reporter.info(f"Crop coordinates selected: {coords}", crop_dimensions=coords)
+
+    # Auto-copy the per-camera crop_dimensions line so the common path
+    # (paste into [servers.<srv>.cameras.<alias>]) is a single cmd-V away.
+    clip_line = f"crop_dimensions = {toml_coords}"
+    copied_suffix = "   (copied to clipboard)" if _copy_to_clipboard(clip_line) else ""
+
+    # Pad the labels to a common width so the values (everything after the
+    # "= ") line up vertically on their first character despite the differing
+    # label lengths.
+    label_settings = "Under [settings]: default_crop_dimensions"
+    label_camera = "Under [servers.<srv>.cameras.<alias>]: crop_dimensions"
+    label_width = max(len(label_settings), len(label_camera))
+
+    # Leading/trailing newlines frame the result so it stands out from the
+    # ROI-window teardown noise; the future-use block ends with a blank line.
+    reporter.info(f"\nCrop coordinates selected: {coords}\n", crop_dimensions=coords)
     reporter.info(
         "For future use, copy one of these lines into your config file:\n"
-        f"  default_crop_dimensions = {toml_coords}   # under [settings]\n"
-        f"  crop_dimensions = {toml_coords}            # under [servers.<srv>.cameras.<alias>]"
+        f"  {label_settings.ljust(label_width)} = {toml_coords}\n"
+        f"  {label_camera.ljust(label_width)} = {toml_coords}{copied_suffix}\n"
     )
     return coords
+
+
+def _write_crop_to_config(
+    config_file: str,
+    server: str,
+    camera_alias: str,
+    toml_coords: str,
+) -> tuple[bool, str]:
+    """Insert or update crop_dimensions under [servers.<server>.cameras.<alias>].
+
+    Edits the config file textually (tomllib is read-only) and validates that
+    the result still parses as TOML *before* writing -- on any problem the file
+    is left untouched and a message is returned for the caller to surface.
+    Supports the canonical explicit-table form used by default.config:
+
+        [servers.<server>.cameras.<alias>]
+        id = ...
+        crop_dimensions = [[x, y], [w, h]]
+
+    Returns ``(success, message)``.
+    """
+    path = Path(config_file)
+    try:
+        original = path.read_text()
+    except OSError as e:
+        return False, f"Could not read {path.name}: {e}"
+
+    lines = original.splitlines(keepends=True)
+    # The alias is a TOML key; it may appear bare or quoted in the header.
+    candidate_headers = {
+        f"[servers.{server}.cameras.{camera_alias}]",
+        f'[servers.{server}.cameras."{camera_alias}"]',
+    }
+    header_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip() in candidate_headers),
+        None,
+    )
+    if header_idx is None:
+        return False, (
+            f"Could not locate [servers.{server}.cameras.{camera_alias}] in "
+            f"{path.name}; left it unchanged (the line is on your clipboard to paste)."
+        )
+
+    # The section runs until the next table header or end of file.
+    section_end = len(lines)
+    for j in range(header_idx + 1, len(lines)):
+        if lines[j].lstrip().startswith('['):
+            section_end = j
+            break
+
+    new_line = f"crop_dimensions = {toml_coords}\n"
+    existing_idx = None
+    last_kv_idx = header_idx
+    for j in range(header_idx + 1, section_end):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        last_kv_idx = j
+        if '=' in stripped and stripped.split('=', 1)[0].strip() == 'crop_dimensions':
+            existing_idx = j
+
+    if existing_idx is not None:
+        lines[existing_idx] = new_line
+    else:
+        # Guard against a missing trailing newline on the line we insert after
+        # (e.g. the section is the last thing in the file with no final \n).
+        if lines[last_kv_idx] and not lines[last_kv_idx].endswith('\n'):
+            lines[last_kv_idx] = lines[last_kv_idx] + '\n'
+        lines.insert(last_kv_idx + 1, new_line)
+
+    new_content = "".join(lines)
+    # Safety net: never write something that won't parse back.
+    try:
+        tomllib.loads(new_content)
+    except tomllib.TOMLDecodeError as e:
+        return False, f"Aborted: the edit would produce invalid TOML ({e}); {path.name} unchanged."
+
+    try:
+        path.write_text(new_content)
+    except OSError as e:
+        return False, f"Could not write {path.name}: {e}"
+
+    verb = "Updated" if existing_idx is not None else "Added"
+    return True, (
+        f"{verb} crop_dimensions in [servers.{server}.cameras.{camera_alias}] of {path.name}."
+    )
 
 
 def process_video(original_video_path: str, output_video_path: str = None, timestamps: list[datetime] = None) -> str:
@@ -1305,9 +1447,11 @@ def main():
                 f"Fetching a recent clip from {settings.camera_alias} (last {lookback} min)",
             )
 
-            # Probe clip lands in a temp dir that's cleaned automatically; we
-            # never keep it -- it exists only to hand one frame to the selector.
-            with tempfile.TemporaryDirectory(prefix="exacqman_crop_") as tmp_dir:
+            # Probe clip lives in a project-local scratch dir that's cleaned
+            # automatically -- never the system temp dir, so nothing lands
+            # outside the project. It exists only to hand one frame to the selector.
+            TEMP_DIR.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="exacqman_crop_", dir=TEMP_DIR) as tmp_dir:
                 # Construct inside the try so a login/connection failure
                 # surfaces as the same friendly ExacqvisionError message
                 # (the Exacqvision constructor logs in eagerly). RequestException
@@ -1354,9 +1498,40 @@ def main():
                     )
                     exit(1)
 
-                select_crop(frame)
+                # The download is done, but the crop path has no following
+                # stage to retire its progress bar (unlike extract). Close it
+                # now so its leave=False line is cleared -- otherwise the open
+                # bar refreshes under every later print and sits on top of the
+                # input() prompt, which reads as a frozen "re-download".
+                reporter.close()
 
-            reporter.done()
+                coords = select_crop(frame)
+
+            # No reporter.done() here: select_crop already prints the result
+            # block, and a trailing "Done." line would be noise for this
+            # interactive utility.
+
+            # Offer to write the selection straight into the config. Only when
+            # we have a real interactive terminal -- in piped/JSON contexts an
+            # input() prompt would hang, and the clipboard/print already covers
+            # the manual path. The prompt follows the blank line that closes the
+            # "for future use" block above.
+            if sys.stdin.isatty():
+                (cx, cy), (cw, ch) = coords
+                toml_coords = f"[[{cx}, {cy}], [{cw}, {ch}]]"
+                config_name = Path(args.config_file).name
+                answer = input(
+                    f"Automatically add crop_dimensions to "
+                    f"{settings.server}.{settings.camera_alias} in {config_name}? (y/n) "
+                ).strip().lower()
+                if answer in ("y", "yes"):
+                    ok, message = _write_crop_to_config(
+                        args.config_file,
+                        settings.server,
+                        settings.camera_alias,
+                        toml_coords,
+                    )
+                    (reporter.info if ok else reporter.warning)(message)
 
         elif args.command == 'compress':
             final_path = compress_video(settings.input_filename, settings.output_filename)

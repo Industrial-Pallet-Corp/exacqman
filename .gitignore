@@ -173,6 +173,9 @@ cython_debug/
 # .mp4 movie files
 *.mp4
 
+# ExacqMan CLI scratch dir (crop probe clips, etc.)
+.tmp/
+
 # ExacqMan Web Application
 exacqman-web/uploads/
 exacqman-web/exports/
