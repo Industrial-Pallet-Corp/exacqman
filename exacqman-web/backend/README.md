@@ -41,16 +41,24 @@ pip install -r requirements.txt
 
 3. Start the server:
 ```bash
-python run_server.py
+python exacqman_web.py start          # foreground (Ctrl-C to stop)
+python exacqman_web.py start -b       # background (detached; logs -> ../logs/server.log)
 ```
 
-The server will start on `http://localhost:8000`
+The server will start on `http://localhost:8887`. `start` is the default
+subcommand, so bare `python exacqman_web.py` also works.
+
+Stop or check it from any terminal:
+```bash
+python exacqman_web.py stop           # graceful SIGTERM, then SIGKILL after 15s; frees the port
+python exacqman_web.py status         # running / not running + PID, host, port
+```
 
 ## API Documentation
 
 Once the server is running, visit:
-- Interactive API docs: `http://localhost:8000/docs`
-- ReDoc documentation: `http://localhost:8000/redoc`
+- Interactive API docs: `http://localhost:8887/docs`
+- ReDoc documentation: `http://localhost:8887/redoc`
 
 ## Configuration
 

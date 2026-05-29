@@ -41,11 +41,11 @@ exacqman-web/
 │   ├── api/            #   routes + Pydantic models
 │   ├── services/       #   job queue, CLI runner
 │   ├── app.py          #   FastAPI app factory
-│   ├── run_server.py   #   entrypoint (uvicorn)
+│   ├── exacqman_web.py #   start/stop/status entrypoint (uvicorn)
 │   └── README.md       #   backend-specific notes
 ├── frontend/           # static UI (HTML/CSS/JS)
 ├── exports/            # finished videos land here (gitignored)
-└── logs/               # per-job log snippets (gitignored)
+└── logs/               # per-job log snippets + server.pid/server.log (gitignored)
 ```
 
 ## Getting Started
@@ -61,15 +61,30 @@ pip install -r backend/requirements.txt
 # 2. Make sure default.config + default.credentials exist at the repo root
 #    (see ../README.md for setup)
 
-# 3. Start the server (defaults: 0.0.0.0:8000, no auto-reload)
-python backend/run_server.py
-#   --port / -p <n>   pick a different port
-#   --host <addr>     bind to a different interface
-#   --reload          watch for file changes (development only)
+# 3. Start the server (defaults: 0.0.0.0:8887, foreground, no auto-reload)
+python backend/exacqman_web.py start
+#   --port / -p <n>      pick a different port
+#   --host <addr>        bind to a different interface (long-form only)
+#   --reload / -r        watch for file changes (development only)
+#   --background / -b    detach and run in the background (logs -> logs/server.log)
+
+# Stop it (works from any terminal, however it was started):
+python backend/exacqman_web.py stop
+
+# Check whether it's running:
+python backend/exacqman_web.py status
 ```
 
+`start` is the default subcommand, so `python backend/exacqman_web.py` (no
+arguments) still boots the server in the foreground. The running server's PID,
+host, and port are recorded in `logs/server.pid` so `stop`/`status` can find it
+later without hunting through `ps`/`lsof`. `stop` sends a graceful SIGTERM
+(escalating to SIGKILL after 15s), then confirms the port is free; if the PID
+file is missing it falls back to discovering the listener on the port via
+`lsof`.
+
 The browser UI is served at the configured port (e.g.
-`http://localhost:8000/`); FastAPI's auto-generated API docs live at
+`http://localhost:8887/`); FastAPI's auto-generated API docs live at
 `/docs` and `/redoc`.
 
 ## API Surface
