@@ -129,8 +129,8 @@ class Settings:
                 cam_map[str(alias)] = entry
             cameras_by_server[srv_name] = cam_map
 
-        
-        
+        # Resolve the active server and camera. These are per-run values with
+        # no config-file source -- they come from CLI args (args > default).
         server = set_value(
             arg_value='server',
             cls_value=cls.server,
@@ -196,9 +196,9 @@ class Settings:
             camera_alias=camera_alias,
             camera_id=camera_id,
             input_filename=set_value(arg_value='video_filename', cls_value=cls.input_filename),
-            
-            
-            
+            # No config-file source: when -o is omitted, main() builds the
+            # canonical default stem via default_output_stem (same convention
+            # the web service uses).
             output_filename=set_value(
                 arg_value='output_name',
                 cls_value=cls.output_filename,
@@ -211,8 +211,8 @@ class Settings:
                 arg_value='output_dir',
                 cls_value=cls.output_dir,
             ),
-            
-            
+            # Per-run time range comes from CLI args only (positional
+            # date/start/end or the ISO flag pair below) -- no config source.
             date=set_value(
                 arg_value='date',
                 cls_value=cls.date,
@@ -225,9 +225,9 @@ class Settings:
                 arg_value='end',
                 cls_value=cls.end_time,
             ),
-            
-            
-            
+            # ISO 8601 pair, flag-only. Programmatic callers (the web service)
+            # use these to hand the CLI an unambiguous instant; humans can use
+            # either these or the positional date/start/end form.
             start_iso_datetime=set_value(
                 arg_value='start_iso_datetime',
                 cls_value=cls.start_iso_datetime,
@@ -1257,9 +1257,9 @@ def main():
 
     try:
         if args.command == 'extract':
-            
-            
-            
+            # extract needs a config: servers, cameras, timezone, and the
+            # credentials path all live there. Fail clearly before anything
+            # tries to read settings.timezone (ZoneInfo(None) would crash).
             if not config:
                 reporter.error(
                     "ConfigError",
@@ -1268,7 +1268,7 @@ def main():
                 exit(1)
 
             # Resolve server/camera up front so a missing or typo'd value
-            
+            # fails fast with a clear message before any network I/O.
             if not settings.server:
                 reporter.error(
                     "ConfigError",
@@ -1293,18 +1293,18 @@ def main():
 
             timezone = ZoneInfo(settings.timezone)
 
-            
-            
-            
-            
-            
-            
-            
+            # Two ways to specify the time range:
+            #   1. ISO 8601 flags (--start-iso-datetime / --end-iso-datetime)
+            #      -- the programmatic form. Unambiguous: no year/day
+            #      fixups, full precision down to seconds, optional
+            #      timezone offset.
+            #   2. Positional date + start + end -- the human form. Goes
+            #      through `convert_input_to_datetime`, which infers the year
             #      only when the user didn't supply one (e.g. "5/27" without a
-            
-            
-            
-            
+            #      year defaults to "the most recent past 5/27") and rolls
+            #      the end date forward if it lands before the start.
+            # Precedence: ISO flags > positional CLI args. Mixing the two on
+            # the same command is a usage error (two conflicting intents).
             iso_start = settings.start_iso_datetime
             iso_end = settings.end_iso_datetime
             has_iso = bool(iso_start or iso_end)
@@ -1373,15 +1373,15 @@ def main():
                     exit(1)
 
             # If the user didn't pass -o, build the canonical default output
-            
-            
+            # stem from the same shared helper the web service uses. Without
+            # this the exacqvision server picks the filename via
             # Content-Disposition, which is unpredictable and doesn't sort by
-            
-            
-            
-            
-            
-            
+            # date the way our convention does.
+            #
+            # Mutating settings here (rather than threading a local
+            # through) keeps the rest of the extract pipeline -- which
+            # already reads settings.output_filename in multiple places
+            # -- working without modification.
             if not settings.output_filename:
                 settings.output_filename = default_output_stem(
                     start,
@@ -1491,13 +1491,13 @@ def main():
             reporter.done(output=final_path)
 
         elif args.command == 'crop':
-            
-            
-            
+            # Standalone crop-dimension capture: pull a short recent clip,
+            # open the ROI selector on its first frame, print the chosen
+            # dimensions. No timelapse / compress / metadata / output file.
 
-            
-            
-            
+            # Pre-flight resolution checks -- fail fast with a clear message
+            # before any network I/O, reusing the same error taxonomy as
+            # extract. `Settings` resolves server/camera from CLI args.
             if not settings.server:
                 reporter.error(
                     "ConfigError",
