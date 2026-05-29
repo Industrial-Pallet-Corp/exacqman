@@ -5,6 +5,7 @@ from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as duparse
 from zoneinfo import ZoneInfo
 from exacqvision import Exacqvision, ExacqvisionError
+from requests.exceptions import RequestException
 from exacqman_naming import default_output_stem
 from exacqman_config import (
     import_config,
@@ -20,6 +21,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -250,6 +252,79 @@ DEFAULT_MAX_TEXT_WIDTH_FRACTION = 0.8
 BOTTOM_MARGIN_FRACTION = 0.10
 
 
+def fit_to_screen(frame, window_name, screen_width, screen_height):
+    """Resize a frame to fit within the screen dimensions."""
+    original_height, original_width = frame.shape[:2]
+
+    # Determine scaling factor to fit frame within screen dimensions
+    scale_width = screen_width / original_width
+    scale_height = screen_height / original_height
+    scale = min(scale_width, scale_height)  # Use the smaller scale factor
+
+    resized_width = int(original_width * scale)
+    resized_height = int(original_height * scale)
+    resized_frame = cv2.resize(frame, (resized_width, resized_height))
+
+    return resized_frame, scale
+
+
+def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Open the interactive ROI selector on `frame` and return crop dimensions.
+
+    Used by both ``process_video`` (when ``extract -c`` is run without
+    preconfigured crop dimensions) and the standalone ``crop`` subcommand.
+    Emits the selected coordinates through the active reporter -- both a
+    structured ``crop_dimensions`` event and two TOML-paste-ready lines --
+    so a human can copy the result straight into their config file.
+
+    Requires a display: ``cv2.selectROI`` opens a GUI window.
+    """
+    reporter = get_reporter()
+
+    # Create a window to get screen dimensions
+    window_name = "Select ROI"
+
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    temp_width, temp_height = (960, 540)
+    cv2.resizeWindow(window_name, temp_width, temp_height)  # Temporary window size
+
+    # Resize frame to fit screen dimensions
+    resized_frame, scale = fit_to_screen(frame, window_name, temp_width, temp_height)
+
+    instructions = "Click and drag to select desired region, then press Enter."
+
+    # Replace 'first_frame' with frame with instructions
+    frame_with_text = resized_frame.copy()
+    text_size = cv2.getTextSize(instructions, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
+    text_x = (frame_with_text.shape[1] - text_size[0]) // 2
+    text_y = 30  # Position at the top of the frame
+    cv2.putText(frame_with_text, instructions, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+    # Show the resized frame and allow ROI selection
+    roi = cv2.selectROI(window_name, frame_with_text, showCrosshair=True, fromCenter=False)
+    cv2.destroyAllWindows()  # Close the ROI selection window
+
+    # Scale ROI coordinates back to original resolution
+    x, y, w, h = map(int, roi)
+    x = int(x / scale)
+    y = int(y / scale)
+    w = int(w / scale)
+    h = int(h / scale)
+
+    coords = ((x, y), (w, h))
+    # Render the same value in TOML array syntax so users can paste it
+    # straight into either [settings].default_crop_dimensions or a
+    # [servers.<server>.cameras.<alias>].crop_dimensions entry.
+    toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
+    reporter.info(f"Crop coordinates selected: {coords}", crop_dimensions=coords)
+    reporter.info(
+        "For future use, copy one of these lines into your config file:\n"
+        f"  default_crop_dimensions = {toml_coords}   # under [settings]\n"
+        f"  crop_dimensions = {toml_coords}            # under [servers.<srv>.cameras.<alias>]"
+    )
+    return coords
+
+
 def process_video(original_video_path: str, output_video_path: str = None, timestamps: list[datetime] = None) -> str:
     """
     Processes a video by cropping, timelapsing, and timestamping it based on attributes of the settings object.
@@ -270,67 +345,6 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         TypeError: If the timelapse multiplier is invalid.
     """
     reporter = get_reporter()
-
-    def fit_to_screen(frame, window_name, screen_width, screen_height):
-        """Resize a frame to fit within the screen dimensions."""
-        original_height, original_width = frame.shape[:2]
-
-        # Determine scaling factor to fit frame within screen dimensions
-        scale_width = screen_width / original_width
-        scale_height = screen_height / original_height
-        scale = min(scale_width, scale_height)  # Use the smaller scale factor
-
-        resized_width = int(original_width * scale)
-        resized_height = int(original_height * scale)
-        resized_frame = cv2.resize(frame, (resized_width, resized_height))
-
-        return resized_frame, scale
-
-
-    def select_crop(frame) -> tuple[tuple[int,int], tuple[int,int]]:
-        # Create a window to get screen dimensions
-        window_name = "Select ROI"
-        
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        temp_width, temp_height = (960,540)
-        cv2.resizeWindow(window_name, temp_width, temp_height)  # Temporary window size
-
-        # Resize frame to fit screen dimensions
-        resized_frame, scale = fit_to_screen(frame, window_name, temp_width, temp_height)
-
-        instructions = "Click and drag to select desired region, then press Enter."
-
-        # Replace 'first_frame' with frame with instructions
-        frame_with_text = resized_frame.copy()
-        text_size = cv2.getTextSize(instructions, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
-        text_x = (frame_with_text.shape[1] - text_size[0]) // 2
-        text_y = 30  # Position at the top of the frame
-        cv2.putText(frame_with_text, instructions, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-
-        # Show the resized frame and allow ROI selection
-        roi = cv2.selectROI(window_name, frame_with_text, showCrosshair=True, fromCenter=False)
-        cv2.destroyAllWindows()  # Close the ROI selection window
-
-        # Scale ROI coordinates back to original resolution
-        x, y, w, h = map(int, roi)
-        x = int(x / scale)
-        y = int(y / scale)
-        w = int(w / scale)
-        h = int(h / scale)
-
-        coords = ((x, y), (w, h))
-        # Render the same value in TOML array syntax so users can paste it
-        # straight into either [settings].default_crop_dimensions or a
-        # [servers.<server>.cameras.<alias>].crop_dimensions entry.
-        toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
-        reporter.info(f"Crop coordinates selected: {coords}", crop_dimensions=coords)
-        reporter.info(
-            "For future use, copy one of these lines into your config file:\n"
-            f"  default_crop_dimensions = {toml_coords}   # under [settings]\n"
-            f"  crop_dimensions = {toml_coords}            # under [servers.<srv>.cameras.<alias>]"
-        )
-        return coords
-
 
     def calculate_font_scale(video_width: int, video_height: int, caption: Optional[str]) -> float:
         # Static timestamp string: the format is fixed-width so its rendered
@@ -710,6 +724,39 @@ def parse_arguments():
     timelapse_parser.add_argument('-o', '--output_name', default=None, type=str, help='Desired filepath')
     timelapse_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
+
+    # Crop subcommand: grab a recent frame from a camera and open the
+    # interactive ROI selector to capture crop dimensions, without running
+    # any extract/timelapse/compress steps. CLI-only utility for quickly
+    # populating per-camera crop_dimensions in the config. Mirrors extract's
+    # config/credentials/server resolution.
+    crop_parser = subparsers.add_parser(
+        'crop',
+        help='Grab a recent frame and pick crop dimensions for a camera (CLI-only).',
+    )
+    crop_parser.add_argument('camera_alias', type=str, help='Camera alias (must match a [servers.<srv>.cameras.<alias>] entry).')
+    crop_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
+    crop_parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        dest='config_flag',
+        help='Filepath of local TOML config file. Flag-form alternative to the positional config_file; one of the two must be set.',
+    )
+    crop_parser.add_argument(
+        '--credentials',
+        type=str,
+        default=None,
+        help='Path to TOML credentials file. Overrides settings.credentials_file in the config.',
+    )
+    crop_parser.add_argument('--server', type=str, help='Server name (must match a key under [servers] in the config file).')
+    crop_parser.add_argument(
+        '--lookback-minutes',
+        type=int,
+        default=15,
+        dest='lookback_minutes',
+        help='How far back from now to request the probe clip, in minutes (default: 15). Increase if the camera is motion-triggered and has no recent footage.',
+    )
 
     return arg_parser.parse_args()
 
@@ -1212,6 +1259,104 @@ def main():
             )
 
             reporter.done(output=final_path)
+
+        elif args.command == 'crop':
+            # Standalone crop-dimension capture: pull a short recent clip,
+            # open the ROI selector on its first frame, print the chosen
+            # dimensions. No timelapse / compress / metadata / output file.
+
+            # Pre-flight resolution checks -- fail fast with a clear message
+            # before any network I/O, reusing the same error taxonomy as
+            # extract. `Settings` has already resolved server/camera from
+            # args > [runtime] config.
+            if not settings.server:
+                reporter.error(
+                    "ConfigError",
+                    "No server selected. Pass --server or set [runtime].server in the config.",
+                )
+                exit(1)
+            if not settings.server_ip:
+                reporter.error(
+                    "ConfigError",
+                    f'Server "{settings.server}" is not defined under [servers] in the config.',
+                )
+                exit(1)
+            if not settings.camera_id:
+                reporter.error(
+                    "ConfigError",
+                    (
+                        f'Camera alias "{settings.camera_alias}" is not defined under '
+                        f'[servers.{settings.server}.cameras] in the config.'
+                    ),
+                )
+                exit(1)
+
+            timezone = ZoneInfo(settings.timezone)
+            lookback_arg = getattr(args, 'lookback_minutes', 15)
+            lookback = lookback_arg if lookback_arg and lookback_arg > 0 else 15
+
+            # End at "now", look back a modest window. We only need one frame;
+            # the camera framing is static, so any recent frame works.
+            end = datetime.now()
+            start = end - timedelta(minutes=lookback)
+
+            reporter.stage(
+                "crop_probe",
+                f"Fetching a recent clip from {settings.camera_alias} (last {lookback} min)",
+            )
+
+            # Probe clip lands in a temp dir that's cleaned automatically; we
+            # never keep it -- it exists only to hand one frame to the selector.
+            with tempfile.TemporaryDirectory(prefix="exacqman_crop_") as tmp_dir:
+                # Construct inside the try so a login/connection failure
+                # surfaces as the same friendly ExacqvisionError message
+                # (the Exacqvision constructor logs in eagerly). RequestException
+                # covers a server that's unreachable or refusing connections.
+                exapi = None
+                try:
+                    exapi = Exacqvision(
+                        settings.server_ip, settings.username, settings.password, timezone
+                    )
+                    probe_path = exapi.get_video(
+                        settings.camera_id,
+                        start,
+                        end,
+                        video_filename="_crop_probe",
+                        output_dir=Path(tmp_dir),
+                    )
+                except (ExacqvisionError, RequestException) as e:
+                    reporter.error(
+                        "ExacqvisionError",
+                        (
+                            f"Failed to get a probe clip from camera "
+                            f"{settings.camera_alias} on server {settings.server}. "
+                            f"Check the server is reachable and the alias is correct. {e}"
+                        ),
+                    )
+                    exit(1)
+                finally:
+                    if exapi is not None:
+                        exapi.logout()
+
+                vid = cv2.VideoCapture(probe_path)
+                success, frame = (vid.read() if vid.isOpened() else (False, None))
+                vid.release()
+
+                if not success or frame is None:
+                    reporter.error(
+                        "ExacqvisionError",
+                        (
+                            f"No footage was available for {settings.camera_alias} in the "
+                            f"last {lookback} minutes. This camera may be motion-triggered "
+                            f"with no recent activity -- retry with a larger "
+                            f"--lookback-minutes (e.g. --lookback-minutes {lookback * 4})."
+                        ),
+                    )
+                    exit(1)
+
+                select_crop(frame)
+
+            reporter.done()
 
         elif args.command == 'compress':
             final_path = compress_video(settings.input_filename, settings.output_filename)

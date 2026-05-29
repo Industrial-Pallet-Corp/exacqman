@@ -30,13 +30,14 @@ For API testing, [explore the Postman collection](https://weareipc.postman.co/wo
 
 ## Usage
 
-Run `python exacqman.py --help` for detailed command-line options. The script supports three modes:
+Run `python exacqman.py --help` for detailed command-line options. The script supports four modes:
 
 ### Commands
 
 - **extract**: Retrieves video from an ExacqVision server, applies timelapse, adds timestamps, and compresses the output.
 - **compress**: Compresses an existing video file to a specified quality.
 - **timelapse**: Creates a timelapse video from an existing file, with optional cropping and timestamping.
+- **crop**: Grabs a recent frame from a single camera and opens the interactive crop selector, printing crop dimensions to paste into your config. Captures crop dimensions per camera without running a full extraction.
 
 ### Command-Line Syntax
 
@@ -85,6 +86,23 @@ python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c]
 - `-o, --output_name`: Output file path.
 - `-c, --crop`: Enable cropping.
 
+#### Crop Mode
+
+```bash
+python exacqman.py crop camera_alias [config_file] [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
+```
+
+Grabs a short clip from approximately the current moment, opens the interactive ROI selector on its first frame, and prints the selected crop dimensions in TOML-paste-ready form (both a `crop_dimensions` line for `[servers.<srv>.cameras.<alias>]` and a `default_crop_dimensions` line for `[settings]`). It performs no timelapse, compression, or file output -- it is a quick way to capture crop dimensions for each camera.
+
+- `camera_alias`: Camera name (must match a `[servers.<srv>.cameras.<alias>]` entry).
+- `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
+- `--config`: Flag-form alternative to the positional `config_file`.
+- `--credentials`: Path to TOML credentials file. Overrides `settings.credentials_file` in the config.
+- `--server`: Server name (must match a key under `[servers]`). Falls back to `[runtime].server`.
+- `--lookback-minutes`: How far back from now to request the probe clip, in minutes (default: 15). Increase this if the camera is motion-triggered and has no recent footage.
+
+Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI window and therefore requires a display.
+
 ### Example Commands
 
 - Extract video from a camera for March 11, 6 PM to 8 PM, with config and cropping:
@@ -98,6 +116,10 @@ python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c]
 - Create a 5x timelapse video:
   ```bash
   python exacqman.py timelapse input.mp4 5 --output_name timelapse.mp4 --crop
+  ```
+- Capture crop dimensions for a camera (opens the selector on a recent frame):
+  ```bash
+  python exacqman.py crop front_door mydefault.config --server ch
   ```
 
 ## Configuration File
