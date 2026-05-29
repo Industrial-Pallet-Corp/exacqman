@@ -35,6 +35,43 @@ from pathlib import Path
 from progress import get_reporter
 
 
+# Top-level tables that are NOT servers. Every other top-level table in the
+# config is treated as a server (see split_servers_and_cameras).
+RESERVED_TABLES = frozenset({"settings", "runtime"})
+
+
+def split_servers_and_cameras(config: dict) -> tuple[dict[str, str], dict[str, dict]]:
+    """Split a parsed config into its server-URL map and cameras-by-server map.
+
+    Schema (flat form): each top-level table other than ``[settings]`` /
+    ``[runtime]`` is a server. Inside a server table, the scalar ``url`` key is
+    the server URL and every *dict-valued* sub-table (``[<server>.<alias>]``) is
+    a camera, keyed by alias with an ``id`` and optional ``crop_dimensions``.
+
+    Returns:
+        ``(servers_by_name, cameras_by_server)`` where ``servers_by_name`` is
+        ``{name: url}`` (only servers that declare a non-empty url) and
+        ``cameras_by_server`` is ``{name: {alias: cam_dict}}`` for every server
+        table encountered. This is the single source of truth for the schema;
+        all CLI consumers go through it so they can't drift.
+    """
+    servers_by_name: dict[str, str] = {}
+    cameras_by_server: dict[str, dict] = {}
+    for name, table in (config or {}).items():
+        if name in RESERVED_TABLES or not isinstance(table, dict):
+            continue
+        url = table.get("url")
+        if isinstance(url, str) and url.strip():
+            servers_by_name[name] = url
+        # Dict-valued sub-tables are cameras; the scalar `url` is skipped.
+        cameras_by_server[name] = {
+            str(alias): cam
+            for alias, cam in table.items()
+            if isinstance(cam, dict)
+        }
+    return servers_by_name, cameras_by_server
+
+
 def import_config(config_file: str) -> dict:
     """Load a TOML config file and run structural validation.
 
@@ -185,40 +222,35 @@ def validate_config(config: dict) -> bool:
     fatal_errors: list[str] = []
     warnings: list[str] = []
 
-    # Top-level tables must exist before any sub-checks; otherwise downstream
-    # code raises confusing AttributeError/KeyError.
-    required_tables = ['servers', 'settings']
-    for name in required_tables:
-        if not isinstance(config.get(name), dict):
-            fatal_errors.append(f'[{name}] table is missing from config')
-
-    if fatal_errors:
+    # [settings] must exist before any sub-checks; otherwise downstream code
+    # raises confusing AttributeError/KeyError.
+    if not isinstance(config.get('settings'), dict):
         reporter.error(
             "ConfigError",
-            "Config validation failed:\n" + "\n".join(fatal_errors),
+            "Config validation failed:\n[settings] table is missing from config",
         )
         return False
 
-    # [servers] and nested cameras
-    servers_table = config['servers']
-    if not servers_table:
-        fatal_errors.append('At least one server must be defined under [servers.<name>]')
+    # Servers and their cameras. Each top-level table other than the reserved
+    # [settings] / [runtime] is a server, with a scalar `url` and dict-valued
+    # camera sub-tables ([<server>.<alias>]). split_servers_and_cameras() is the
+    # single source of truth for that mapping; here we re-walk the raw tables so
+    # we can report shape problems (bad url, bad id, reserved name) precisely.
+    _, cameras_by_server = split_servers_and_cameras(config)
+    if not cameras_by_server:
+        fatal_errors.append('At least one server must be defined as a top-level [<name>] table')
 
-    for srv_name, srv_data in servers_table.items():
+    for srv_name, _table in config.items():
+        if srv_name in RESERVED_TABLES or not isinstance(_table, dict):
+            continue
         if '.' in srv_name:
             fatal_errors.append(f'Server name "{srv_name}" must not contain "."')
-        if not isinstance(srv_data, dict):
-            fatal_errors.append(f'[servers.{srv_name}] must be a table')
-            continue
 
-        url = srv_data.get('url', '')
+        url = _table.get('url', '')
         if not isinstance(url, str) or not url.strip():
-            fatal_errors.append(f'[servers.{srv_name}].url is missing or empty')
+            fatal_errors.append(f'[{srv_name}].url is missing or empty')
 
-        cameras_table = srv_data.get('cameras', {})
-        if not isinstance(cameras_table, dict):
-            fatal_errors.append(f'[servers.{srv_name}.cameras] must be a table')
-            continue
+        cameras_table = cameras_by_server.get(srv_name, {})
         if not cameras_table:
             warnings.append(f'Server "{srv_name}" has no cameras defined')
             continue
@@ -226,22 +258,19 @@ def validate_config(config: dict) -> bool:
         for alias, cam_data in cameras_table.items():
             if '.' in str(alias):
                 fatal_errors.append(f'Camera alias "{alias}" must not contain "."')
-            if not isinstance(cam_data, dict):
-                fatal_errors.append(f'[servers.{srv_name}.cameras.{alias}] must be a table')
-                continue
 
             cam_id = cam_data.get('id')
             if cam_id is None:
-                fatal_errors.append(f'[servers.{srv_name}.cameras.{alias}].id is required')
+                fatal_errors.append(f'[{srv_name}.{alias}].id is required')
             elif not isinstance(cam_id, int) or isinstance(cam_id, bool) or cam_id <= 0:
                 fatal_errors.append(
-                    f'[servers.{srv_name}.cameras.{alias}].id must be a positive integer'
+                    f'[{srv_name}.{alias}].id must be a positive integer'
                 )
 
             cam_crop = cam_data.get('crop_dimensions')
             if cam_crop is not None and not _is_valid_crop(cam_crop):
                 fatal_errors.append(
-                    f'[servers.{srv_name}.cameras.{alias}].crop_dimensions must be '
+                    f'[{srv_name}.{alias}].crop_dimensions must be '
                     '[[x, y], [w, h]] with integer values'
                 )
 
@@ -281,21 +310,18 @@ def validate_config(config: dict) -> bool:
     runtime = config.get('runtime', {})
     if isinstance(runtime, dict):
         runtime_server = runtime.get('server')
-        if runtime_server is not None and runtime_server not in servers_table:
+        if runtime_server is not None and runtime_server not in cameras_by_server:
             fatal_errors.append(
-                f'runtime.server "{runtime_server}" is not defined under [servers]'
+                f'runtime.server "{runtime_server}" is not defined as a top-level [<name>] table'
             )
         else:
             runtime_alias = runtime.get('camera_alias')
             if runtime_server and runtime_alias is not None:
-                srv_cameras = (
-                    servers_table.get(runtime_server, {}).get('cameras', {})
-                    if isinstance(servers_table.get(runtime_server), dict) else {}
-                )
+                srv_cameras = cameras_by_server.get(runtime_server, {})
                 if str(runtime_alias) not in {str(k) for k in srv_cameras.keys()}:
                     fatal_errors.append(
-                        f'runtime.camera_alias "{runtime_alias}" is not defined under '
-                        f'[servers.{runtime_server}.cameras]'
+                        f'runtime.camera_alias "{runtime_alias}" is not defined as a '
+                        f'[{runtime_server}.{runtime_alias}] table'
                     )
 
         if 'crop' in runtime and not isinstance(runtime['crop'], bool):
