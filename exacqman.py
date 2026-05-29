@@ -12,8 +12,6 @@ from exacqman_config import (
     import_credentials,
     resolve_credentials_path,
     split_servers_and_cameras,
-    validate_config,
-    validate_credentials,
 )
 from progress import init_reporter, get_reporter
 import argparse
@@ -48,7 +46,7 @@ class Settings:
     ''' 
     Class that centralizes the settings for the program.
     Default settings can be set in this class. 
-    ArgParse and configParser overwrite the settings in this class (argParse > configParser > defaults)
+    CLI args and the TOML config overwrite the settings in this class (CLI args > config > defaults)
     '''
     username: str = None
     password: str = None
@@ -561,6 +559,13 @@ def process_video(original_video_path: str, output_video_path: str = None, times
 
     fps = vid.get(cv2.CAP_PROP_FPS)
     success, frame = vid.read()
+    if not success or frame is None:
+        vid.release()
+        reporter.error(
+            "VideoReadError",
+            f"Could not read any frames from video file: {original_video_path}",
+        )
+        exit(1)
     height, width = frame.shape[:2]
 
     # Handle cropping setup
@@ -642,7 +647,14 @@ def process_video(original_video_path: str, output_video_path: str = None, times
 
         if timestamps:
             frame_position = vid.get(cv2.CAP_PROP_POS_FRAMES)
-            current_timestamp = timestamps[int(frame_position / total_frames * (number_of_timestamps - 1))]
+            # Some containers report an unreliable frame count (0 or negative)
+            # even when frames decode fine; fall back to the running count so
+            # the mapping never divides by zero, and clamp the resulting index
+            # so a slightly-off frame count can't index past the timestamps.
+            denominator = total_frames if total_frames > 0 else max(count + 1, 1)
+            ts_index = int(frame_position / denominator * (number_of_timestamps - 1))
+            ts_index = max(0, min(ts_index, number_of_timestamps - 1))
+            current_timestamp = timestamps[ts_index]
             timestamp_string = current_timestamp.strftime('%Y-%m-%d %H:%M:%S')
             x_pos, y_pos = calculate_xy_text_position(
                 crop_height, crop_width, timestamp_string, font_scale,
@@ -1214,7 +1226,7 @@ def main():
     )
 
     # Enforce caption length on the effective post-merge value so the rule
-    # applies uniformly regardless of source (CLI --caption or [Settings] caption).
+    # applies uniformly regardless of source (CLI --caption or [settings] caption).
     if settings.caption and len(settings.caption) > Settings.caption_limit:
         reporter.error(
             "CaptionTooLong",
@@ -1327,10 +1339,12 @@ def main():
                 extract_output_dir = Path(settings.output_dir).resolve()
                 extract_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Instantiate api class and retrieve video
-            exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
-
+            # Instantiate api class and retrieve video. The constructor logs
+            # in, so keep it inside the try where connection/auth failures are
+            # reported cleanly instead of surfacing as a raw traceback.
+            exapi = None
             try:
+                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
                 # When `extract_output_dir` is set, the raw download lands
                 # in that directory; `process_video` and `compress_video`
                 # both default to writing next to their input, so the
@@ -1343,9 +1357,17 @@ def main():
                     video_filename=settings.output_filename,
                     output_dir=extract_output_dir,
                 )
-                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)  # Reinstantiated object because of auth token timeout.
+                # The auth token can expire during a long download, so we
+                # re-authenticate with a fresh client for the timestamp
+                # query. Close the first session before swapping the
+                # reference so it is never leaked.
+                try:
+                    exapi.logout()
+                except Exception:
+                    pass
+                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
                 video_timestamps = exapi.get_timestamps(settings.camera_id, start, end)
-            except ExacqvisionError as e:
+            except (ExacqvisionError, RequestException) as e:
                 reporter.error(
                     "ExacqvisionError",
                     (
@@ -1356,7 +1378,14 @@ def main():
                 )
                 exit(1)
             finally:
-                exapi.logout()
+                # Guarded so a logout network error can't mask the real
+                # outcome (including the exit(1) above). `exapi` may still be
+                # None if the very first login failed.
+                if exapi is not None:
+                    try:
+                        exapi.logout()
+                    except Exception:
+                        pass
 
             processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
             final_path = compress_video(processed_video_path)

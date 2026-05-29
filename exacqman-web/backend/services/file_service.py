@@ -6,7 +6,6 @@ Handles file operations for processed videos in the ExacqMan web application.
 
 import os
 import json
-import shutil
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,12 +43,15 @@ class FileService:
     
     def __init__(self):
         """Initialize the file service."""
-        # exports directory is at the same level as backend directory
-        self.exports_dir = Path("../exports")
+        # Exports live at the project root (<root>/exports), shared with the
+        # CLI and JobQueue. Resolve from this file's location so the path is
+        # correct regardless of the working directory the server is launched
+        # from. From backend/services/, go up four levels to reach the root.
+        self.exports_dir = Path(__file__).resolve().parent.parent.parent.parent / "exports"
         self.allowed_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
         
         # Ensure exports directory exists
-        self.exports_dir.mkdir(exist_ok=True)
+        self.exports_dir.mkdir(parents=True, exist_ok=True)
     
     def get_processed_videos(self) -> List[FileInfo]:
         """

@@ -15,7 +15,7 @@ the extract runs, and delivers the finished video into `exports/`.
                                        │
                                        │ writes
                                        ▼
-                              `exacqman-web/exports/`
+                               `<repo root>/exports/`
 ```
 
 - **Frontend** (`frontend/`): vanilla HTML/CSS/JS. Polls `GET /api/jobs` for
@@ -44,9 +44,12 @@ exacqman-web/
 │   ├── exacqman_web.py #   start/stop/status entrypoint (uvicorn)
 │   └── README.md       #   backend-specific notes
 ├── frontend/           # static UI (HTML/CSS/JS)
-├── exports/            # finished videos land here (gitignored)
 └── logs/               # per-job log snippets + server.pid/server.log (gitignored)
 ```
+
+Finished videos are written to `exports/` at the **project root** (one level
+above `exacqman-web/`, gitignored), shared with the CLI so terminal users
+running from the repo root find them right alongside the tool.
 
 ## Getting Started
 
@@ -130,7 +133,7 @@ python3 -u <repo>/exacqman.py \
     --multiplier <int> \
     -c \
     -o <output stem> \
-    --output-dir <abs path to exacqman-web/exports> \
+    --output-dir <abs path to <repo>/exports> \
     [--server <name>] \
     [--caption <text>]
 ```

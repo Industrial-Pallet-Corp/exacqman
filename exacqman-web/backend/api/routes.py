@@ -49,10 +49,13 @@ async def extract_video(request: ExtractRequest) -> ApiResponse:
     already waiting the request is rejected with HTTP 429.
     """
     try:
-        if not config_service.validate_camera(request.config_file, request.camera_alias):
+        if not config_service.validate_camera(
+            request.config_file, request.camera_alias, request.server
+        ):
+            where = f" on server '{request.server}'" if request.server else ""
             raise HTTPException(
                 status_code=400,
-                detail=f"Camera '{request.camera_alias}' not found in configuration",
+                detail=f"Camera '{request.camera_alias}'{where} not found in configuration",
             )
 
         try:

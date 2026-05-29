@@ -137,9 +137,7 @@ class ExacqManService:
         cmd_args = []
         try:
             output_filename = self._generate_output_filename(request)
-            exports_dir = (
-                self.working_directory / "exacqman-web" / "exports"
-            ).resolve()
+            exports_dir = (self.working_directory / "exports").resolve()
 
             # Build command arguments. We use flag forms exclusively (except for
             # the leading `camera_alias` positional) so the call is unambiguous
