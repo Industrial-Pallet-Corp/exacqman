@@ -176,9 +176,11 @@ cython_debug/
 # ExacqMan CLI scratch dir (crop probe clips, etc.)
 .tmp/
 
+# Finished extracts delivered by the CLI and web service (project root)
+exports/
+
 # ExacqMan Web Application
 exacqman-web/uploads/
-exacqman-web/exports/
 exacqman-web/logs/
 exacqman-web/backend/__pycache__/
 exacqman-web/backend/*.pyc

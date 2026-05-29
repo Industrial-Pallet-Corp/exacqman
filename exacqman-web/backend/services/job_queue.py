@@ -59,13 +59,13 @@ remain unambiguous next to anything else that lands here. Currently kept
 indefinitely -- cleanup is a separate maintenance concern."""
 
 EXPORTS_DIR = (
-    Path(__file__).resolve().parent.parent.parent / "exports"
+    Path(__file__).resolve().parent.parent.parent.parent / "exports"
 )
 """Directory where the CLI delivers finished extracts (and where the UI's
-file browser reads from). Mirrors the path the CLI is told to write into
-via ``--output-dir`` in ``services.exacqman_service``; we recompute it
-here so the prune step doesn't have to thread a reference through the
-JobQueue constructor."""
+file browser reads from). Lives at the project root (<root>/exports), the
+same location the CLI is told to write into via ``--output-dir`` in
+``services.exacqman_service``; we recompute it here so the prune step
+doesn't have to thread a reference through the JobQueue constructor."""
 
 MAX_EXPORT_FILES = 25
 """Hard cap on the number of finished-extract .mp4 files retained in

@@ -136,10 +136,24 @@ class ConfigService:
             logger.exception("Error getting config info from %s", config_file)
             raise
 
-    def validate_camera(self, config_file: str, camera_alias: str) -> bool:
-        """Return True iff `camera_alias` exists under any server in the config."""
+    def validate_camera(
+        self, config_file: str, camera_alias: str, server: Optional[str] = None
+    ) -> bool:
+        """Return True iff the requested camera exists in the config.
+
+        When ``server`` is given, the ``(server, alias)`` pair must match: with
+        per-server camera tables the same alias can live under multiple servers,
+        and the extract job resolves the camera by that exact pair (see
+        ``exacqman.Settings``). When ``server`` is None we fall back to a global
+        alias check.
+        """
         try:
             cameras = self.get_available_cameras(config_file)
+            if server:
+                return any(
+                    camera.alias == camera_alias and camera.server == server
+                    for camera in cameras
+                )
             return any(camera.alias == camera_alias for camera in cameras)
         except Exception:
             logger.exception("Error validating camera %s", camera_alias)

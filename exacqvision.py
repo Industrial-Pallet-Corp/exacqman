@@ -58,8 +58,33 @@ class Exacqvision:
         'Content-Type': 'application/x-www-form-urlencoded'
         }
 
-        response = requests.request("POST", url, headers=headers, data=payload)
-        session_id = json.loads(response.text)['sessionId']
+        try:
+            response = requests.request("POST", url, headers=headers, data=payload)
+        except RequestException as e:
+            raise ExacqvisionError(
+                f"Could not reach the Exacqvision server at {self.base_url}: {e}"
+            )
+
+        if not response.ok:
+            raise ExacqvisionError(
+                f"Login to {self.base_url} failed with HTTP {response.status_code}. "
+                f"Check the server URL and that the service is reachable."
+            )
+
+        try:
+            body = json.loads(response.text)
+        except (json.JSONDecodeError, ValueError):
+            raise ExacqvisionError(
+                f"Login to {self.base_url} returned a non-JSON response; the URL "
+                f"may not point to an Exacqvision API."
+            )
+
+        session_id = body.get('sessionId')
+        if not session_id:
+            raise ExacqvisionError(
+                f"Login to {self.base_url} did not return a session ID. "
+                f"Check the username and password."
+            )
 
         return session_id
 
@@ -95,7 +120,7 @@ class Exacqvision:
         # Parse the input string and assign the timezone in one line
         gmt_datetime = time.replace(tzinfo=ZoneInfo('GMT'))
 
-        # Convert to GMT timezone
+        # Convert to the local timezone
         local_datetime = gmt_datetime.astimezone(self.timezone)
 
         return local_datetime
@@ -235,9 +260,29 @@ class Exacqvision:
         url = f"{self.base_url}/v1/export.web?export={export_id}&action=download"
 
         # Setting stream=True is necessary to read the response body in chunks.
-        response = requests.get(url, stream=True)
+        try:
+            response = requests.get(url, stream=True)
+        except RequestException as e:
+            raise ExacqvisionError(
+                f"Could not download export {export_id} from {self.base_url}: {e}"
+            )
 
-        file_name = response.headers.get('Content-Disposition').split('filename=')[-1].strip('"')
+        if not response.ok:
+            raise ExacqvisionError(
+                f"Export download failed with HTTP {response.status_code} "
+                f"for export {export_id}."
+            )
+
+        # Most responses carry the server-chosen name in Content-Disposition,
+        # but it isn't guaranteed. Parse defensively and fall back to a stable
+        # name derived from the export id so the download still lands sensibly.
+        content_disposition = response.headers.get('Content-Disposition', '') or ''
+        if 'filename=' in content_disposition:
+            file_name = content_disposition.split('filename=')[-1].strip().strip('"')
+        else:
+            file_name = ''
+        if not file_name:
+            file_name = f"export_{export_id}.mp4"
         total_size = int(response.headers.get('content-length', 0))
 
         # Where on disk we'll actually write the bytes. Historically this was
@@ -377,7 +422,7 @@ class Exacqvision:
             list[datetime]: List of unique timestamps (one per second) in the local timezone.
         """
         
-        search_id, response = self.create_search(camera_id, start, stop)
+        _, response = self.create_search(camera_id, start, stop)
 
         # An empty/absent videoInfo means the window had no recorded footage
         # (common for motion-triggered cameras). Return an empty list rather
