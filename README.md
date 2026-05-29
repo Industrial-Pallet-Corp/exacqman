@@ -89,12 +89,12 @@ python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c]
 #### Crop Mode
 
 ```bash
-python exacqman.py crop camera_alias [config_file] [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
+python exacqman.py crop --camera CAMERA [config_file] [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
 ```
 
 Grabs a short clip from approximately the current moment, opens the interactive ROI selector on its first frame, and prints the selected crop dimensions in TOML-paste-ready form (both a `crop_dimensions` line for `[<server>.<alias>]` and a `default_crop_dimensions` line for `[settings]`). It performs no timelapse, compression, or file output -- it is a quick way to capture crop dimensions for each camera.
 
-- `camera_alias`: Camera name (must match a `[<server>.<alias>]` entry).
+- `--camera`: Camera name, required (must match a `[<server>.<alias>]` entry).
 - `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
 - `--config`: Flag-form alternative to the positional `config_file`.
 - `--credentials`: Path to TOML credentials file. Overrides `settings.credentials_file` in the config.
@@ -119,7 +119,7 @@ Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI w
   ```
 - Capture crop dimensions for a camera (opens the selector on a recent frame):
   ```bash
-  python exacqman.py crop front_door mydefault.config --server ch
+  python exacqman.py crop --camera front_door mydefault.config --server ch
   ```
 
 ## Configuration File

@@ -868,7 +868,7 @@ def parse_arguments():
         'crop',
         help='Grab a recent frame and pick crop dimensions for a camera (CLI-only).',
     )
-    crop_parser.add_argument('camera_alias', type=str, help='Camera alias (must match a [<server>.<alias>] entry).')
+    crop_parser.add_argument('--camera', type=str, required=True, dest='camera_alias', help='Camera alias (required; must match a [<server>.<alias>] entry).')
     crop_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
     crop_parser.add_argument(
         '--config',
