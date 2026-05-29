@@ -142,10 +142,15 @@ class Exacqvision:
         try:
             response = requests.request("GET", url)
             response.raise_for_status()
-            search_id = json.loads(response.text)['search_id']
+            # `search_id` is absent when the search produced no results (e.g. a
+            # window with no recorded footage). Don't treat that as a hard error
+            # -- callers (get_timestamps) inspect `videoInfo` for clips and can
+            # decide what an empty result means. Only genuine HTTP / decode
+            # failures should raise here.
+            search_id = json.loads(response.text).get('search_id')
             return search_id, response
-        except (RequestException, ValueError, KeyError) as e:
-            raise ExacqvisionError(f"Export request failed: {str(e)}")
+        except (RequestException, ValueError) as e:
+            raise ExacqvisionError(f"Search request failed: {str(e)}")
 
 
     def export_request(self, camera_id: int, start: datetime, stop: datetime, name: str = None) -> str:
@@ -374,7 +379,16 @@ class Exacqvision:
         
         search_id, response = self.create_search(camera_id, start, stop)
 
-        clips = json.loads(response.text)['videoInfo'][0]['clips']
+        # An empty/absent videoInfo means the window had no recorded footage
+        # (common for motion-triggered cameras). Return an empty list rather
+        # than raising on a missing key/index so callers can handle "no
+        # footage" as an expected outcome instead of an error.
+        video_info = json.loads(response.text).get('videoInfo') or []
+        if not video_info:
+            return []
+        clips = video_info[0].get('clips') or []
+        if not clips:
+            return []
 
         # Returns list of all seconds between two times
         def generate_time_range(start_time, stop_time, stepsize=1):
