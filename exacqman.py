@@ -36,6 +36,12 @@ from typing import Any, Dict, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent
 TEMP_DIR = PROJECT_ROOT / ".tmp"
 
+# Length of the throwaway clip the `crop` subcommand exports just to grab a
+# single frame for the ROI selector. Kept tiny on purpose: the camera framing
+# is static, so a couple of seconds is plenty, and exporting the full lookback
+# window would download minutes (often gigabytes) of footage we never use.
+CROP_PROBE_SECONDS = 2
+
 
 @dataclass
 class Settings:
@@ -1429,14 +1435,15 @@ def main():
             lookback_arg = getattr(args, 'lookback_minutes', 15)
             lookback = lookback_arg if lookback_arg and lookback_arg > 0 else 15
 
-            # End at "now", look back a modest window. We only need one frame;
-            # the camera framing is static, so any recent frame works.
+            # End at "now", look back a modest window for *recorded footage*.
+            # We only need one frame; the camera framing is static, so any
+            # recent frame works.
             end = datetime.now()
             start = end - timedelta(minutes=lookback)
 
             reporter.stage(
                 "crop_probe",
-                f"Fetching a recent clip from {settings.camera_alias} (last {lookback} min)",
+                f"Searching the last {lookback} min for footage from {settings.camera_alias}",
             )
 
             # Probe clip lives in a project-local scratch dir that's cleaned
@@ -1453,13 +1460,45 @@ def main():
                     exapi = Exacqvision(
                         settings.server_ip, settings.username, settings.password, timezone
                     )
+
+                    # Search the window for seconds that actually have footage,
+                    # then export just a ~2s slice around the most recent one.
+                    # Exporting the entire lookback window would download
+                    # minutes (often gigabytes) of video to read a single frame.
+                    try:
+                        footage_seconds = exapi.get_timestamps(
+                            settings.camera_id, start, end
+                        )
+                    except (ExacqvisionError, RequestException):
+                        raise
+                    except Exception:
+                        # No videoInfo/clips in the response, etc. -- treat as
+                        # "no footage" rather than leaking a parse traceback.
+                        footage_seconds = []
+
+                    if not footage_seconds:
+                        reporter.error(
+                            "ExacqvisionError",
+                            (
+                                f"No footage was available for {settings.camera_alias} in the "
+                                f"last {lookback} minutes. This camera may be motion-triggered "
+                                f"with no recent activity -- retry with a larger "
+                                f"--lookback-minutes (e.g. --lookback-minutes {lookback * 4})."
+                            ),
+                        )
+                        exit(1)
+
+                    probe_start = footage_seconds[-1]
+                    probe_end = probe_start + timedelta(seconds=CROP_PROBE_SECONDS)
                     probe_path = exapi.get_video(
                         settings.camera_id,
-                        start,
-                        end,
+                        probe_start,
+                        probe_end,
                         video_filename="_crop_probe",
                         output_dir=Path(tmp_dir),
                     )
+                except SystemExit:
+                    raise
                 except (ExacqvisionError, RequestException) as e:
                     reporter.error(
                         "ExacqvisionError",
@@ -1482,10 +1521,9 @@ def main():
                     reporter.error(
                         "ExacqvisionError",
                         (
-                            f"No footage was available for {settings.camera_alias} in the "
-                            f"last {lookback} minutes. This camera may be motion-triggered "
-                            f"with no recent activity -- retry with a larger "
-                            f"--lookback-minutes (e.g. --lookback-minutes {lookback * 4})."
+                            f"Found footage for {settings.camera_alias} but couldn't decode a "
+                            f"frame from the probe clip. Try again, or widen the window with a "
+                            f"larger --lookback-minutes (e.g. --lookback-minutes {lookback * 4})."
                         ),
                     )
                     exit(1)
