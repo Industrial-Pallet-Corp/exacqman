@@ -173,7 +173,7 @@ class ExacqManService:
                 "--start-iso-datetime", request.start_datetime.isoformat(),
                 "--end-iso-datetime", request.end_datetime.isoformat(),
                 "--multiplier", str(request.timelapse_multiplier),
-                "-c",  # Enable cropping to apply crop_dimensions and font_weight settings
+                "-c", "true",  # Enable cropping to apply crop_dimensions and font_weight settings
                 "-o", output_filename,
                 "--output-dir", str(exports_dir),
             ]

@@ -4,8 +4,8 @@ Configuration Service
 Reads ExacqMan TOML configuration files for the web application.
 
 The CLI tool (``exacqman.py``) consumes the same config files, so this module
-mirrors its structure expectations: ``[settings]`` and ``[runtime]`` are
-reserved top-level tables, and every other top-level table is a server. A
+mirrors its structure expectations: ``[settings]`` is the reserved top-level
+table, and every other top-level table is a server. A
 server table holds a scalar ``url`` and dict-valued camera sub-tables
 (``[<server>.<alias>]``). Authentication is loaded from a separate credentials
 file by the CLI (see ``sample.credentials``).
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Top-level tables that are NOT servers (mirror of
 # exacqman_config.RESERVED_TABLES).
-RESERVED_TABLES = frozenset({"settings", "runtime"})
+RESERVED_TABLES = frozenset({"settings"})
 
 
 def _iter_server_tables(config: dict):

@@ -112,7 +112,6 @@ class Settings:
 
         auth = auth or {}
         settings_table = config.get('settings', {})
-        runtime = config.get('runtime', {})
 
         # Build the flat name->url map and the nested cameras-by-server map via
         # the shared schema helper, then normalize per-camera crop dimensions to
@@ -130,15 +129,14 @@ class Settings:
                 cam_map[str(alias)] = entry
             cameras_by_server[srv_name] = cam_map
 
-        # Resolve the active server and camera (args > runtime config > default).
+        # Resolve the active server and camera. These are per-run values with
+        # no config-file source -- they come from CLI args (args > default).
         server = set_value(
             arg_value='server',
-            config_value=runtime.get('server'),
             cls_value=cls.server,
         )
         camera_alias = set_value(
             arg_value='camera_alias',
-            config_value=runtime.get('camera_alias'),
             cls_value=cls.camera_alias,
         )
         if camera_alias is not None:
@@ -179,7 +177,7 @@ class Settings:
             ),
             crop=bool(set_value(
                 arg_value='crop',
-                config_value=runtime.get('crop'),
+                config_value=settings_table.get('default_crop'),
                 cls_value=cls.crop,
             )),
             default_crop_dimensions=default_crop,
@@ -190,7 +188,6 @@ class Settings:
             ),
             caption=set_value(
                 arg_value='caption',
-                config_value=runtime.get('caption'),
                 cls_value=cls.caption,
             ),
 
@@ -199,9 +196,11 @@ class Settings:
             camera_alias=camera_alias,
             camera_id=camera_id,
             input_filename=set_value(arg_value='video_filename', cls_value=cls.input_filename),
+            # No config-file source: when -o is omitted, main() builds the
+            # canonical default stem via default_output_stem (same convention
+            # the web service uses).
             output_filename=set_value(
                 arg_value='output_name',
-                config_value=runtime.get('filename'),
                 cls_value=cls.output_filename,
             ),
             # Flag-only, since "deliver here" is a per-invocation choice
@@ -212,25 +211,23 @@ class Settings:
                 arg_value='output_dir',
                 cls_value=cls.output_dir,
             ),
+            # Per-run time range comes from CLI args only (positional
+            # date/start/end or the ISO flag pair below) -- no config source.
             date=set_value(
                 arg_value='date',
-                config_value=runtime.get('date'),
                 cls_value=cls.date,
             ),
             start_time=set_value(
                 arg_value='start',
-                config_value=runtime.get('start_time'),
                 cls_value=cls.start_time,
             ),
             end_time=set_value(
                 arg_value='end',
-                config_value=runtime.get('end_time'),
                 cls_value=cls.end_time,
             ),
-            # ISO 8601 pair. Flag-only (no config-file source) because
-            # encoding an exact instant in a reusable config file would be
-            # an anti-pattern -- if you want a recurring time, use the
-            # human-friendly `runtime.date` / `runtime.start_time` pair.
+            # ISO 8601 pair, flag-only. Programmatic callers (the web service)
+            # use these to hand the CLI an unambiguous instant; humans can use
+            # either these or the positional date/start/end form.
             start_iso_datetime=set_value(
                 arg_value='start_iso_datetime',
                 cls_value=cls.start_iso_datetime,
@@ -743,6 +740,27 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
     return compressed_video_path
 
 
+_BOOL_FLAG_TRUE = {"true", "yes", "1"}
+_BOOL_FLAG_FALSE = {"false", "no", "0"}
+
+
+def _parse_bool_flag(value: str) -> bool:
+    """argparse ``type`` for value-taking boolean flags (e.g. ``--crop true``).
+
+    Accepts ``true/false`` (case-insensitive) plus the common ``yes/no`` and
+    ``1/0`` synonyms. Raises ``argparse.ArgumentTypeError`` on anything else so
+    argparse reports a clean usage error rather than silently coercing.
+    """
+    normalized = str(value).strip().lower()
+    if normalized in _BOOL_FLAG_TRUE:
+        return True
+    if normalized in _BOOL_FLAG_FALSE:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"expected true or false (got {value!r})"
+    )
+
+
 def parse_arguments():
     """
     Parses command-line arguments for video processing tasks.
@@ -780,7 +798,7 @@ def parse_arguments():
 
     # Extract mode subcommand
     extract_parser = subparsers.add_parser('extract', help='Extract, timelapse, and compress a video file')
-    extract_parser.add_argument('camera_alias', nargs='?', default=None, type=str, help='Name of camera wanted')
+    extract_parser.add_argument('camera_alias', type=str, help='Name of camera wanted (required)')
     extract_parser.add_argument('date', nargs='?', default=None, type=str, help='Date of the requested video. If the footage spans past midnight, provide the date on which the footage starts. (e.g. 3/11)')
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
     extract_parser.add_argument('end', nargs='?', default=None, type=str, help='Ending timestamp of video requested (e.g. 5pm)')
@@ -860,7 +878,7 @@ def parse_arguments():
     )
     extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
     extract_parser.add_argument('--multiplier', type=int, help='Desired timelapse multiplier (must be a positive integer)')
-    extract_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    extract_parser.add_argument('-c', '--crop', type=_parse_bool_flag, default=None, metavar='{true,false}', help='Crop the video (true/false). When unset, defers to [settings].default_crop in the config. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     extract_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     # Compress subcommand
@@ -874,7 +892,7 @@ def parse_arguments():
     timelapse_parser.add_argument('video_filename', type=str, help='Video file for timelapse')
     timelapse_parser.add_argument('multiplier', default=None, type=int, help='Desired timelapse multiplier (must be a positive integer)')
     timelapse_parser.add_argument('-o', '--output_name', default=None, type=str, help='Desired filepath')
-    timelapse_parser.add_argument('-c', '--crop', action='store_true', default=None, help='Crop the video. Can also be set via [runtime].crop in the config file. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
+    timelapse_parser.add_argument('-c', '--crop', type=_parse_bool_flag, default=None, metavar='{true,false}', help='Crop the video (true/false). When unset, defers to [settings].default_crop in the config. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
     # Crop subcommand: grab a recent frame from a camera and open the
@@ -1239,6 +1257,40 @@ def main():
 
     try:
         if args.command == 'extract':
+            # extract needs a config: servers, cameras, timezone, and the
+            # credentials path all live there. Fail clearly before anything
+            # tries to read settings.timezone (ZoneInfo(None) would crash).
+            if not config:
+                reporter.error(
+                    "ConfigError",
+                    "extract requires a config file. Provide it positionally or with --config.",
+                )
+                exit(1)
+
+            # Resolve server/camera up front so a missing or typo'd value
+            # fails fast with a clear message before any network I/O.
+            if not settings.server:
+                reporter.error(
+                    "ConfigError",
+                    "No server selected. Pass --server <name> (must match a top-level [<server>] table in the config).",
+                )
+                exit(1)
+            if not settings.server_ip:
+                reporter.error(
+                    "ConfigError",
+                    f'Server "{settings.server}" is not defined as a top-level [<server>] table in the config.',
+                )
+                exit(1)
+            if not settings.camera_id:
+                reporter.error(
+                    "ConfigError",
+                    (
+                        f'Camera alias "{settings.camera_alias}" is not defined as a '
+                        f'[{settings.server}.{settings.camera_alias}] table in the config.'
+                    ),
+                )
+                exit(1)
+
             timezone = ZoneInfo(settings.timezone)
 
             # Two ways to specify the time range:
@@ -1246,20 +1298,13 @@ def main():
             #      -- the programmatic form. Unambiguous: no year/day
             #      fixups, full precision down to seconds, optional
             #      timezone offset.
-            #   2. Positional date + start + end (or runtime.{date,start_time,
-            #      end_time} in the config) -- the human form. Goes through
-            #      `convert_input_to_datetime`, which infers the year only
-            #      when the user didn't supply one (e.g. "5/27" without a
+            #   2. Positional date + start + end -- the human form. Goes
+            #      through `convert_input_to_datetime`, which infers the year
+            #      only when the user didn't supply one (e.g. "5/27" without a
             #      year defaults to "the most recent past 5/27") and rolls
             #      the end date forward if it lands before the start.
-            # Precedence: ISO flags > positional CLI args > config-file
-            # [runtime] values. Mixing ISO flags with positional CLI args
-            # is a usage error (the user gave two conflicting intents on
-            # the same command line); silently overriding [runtime] config-
-            # file defaults with ISO flags is fine -- that's just normal
-            # CLI-beats-config precedence, and avoids forcing users to
-            # strip leftover `runtime.date`/etc. from configs that are
-            # otherwise reusable.
+            # Precedence: ISO flags > positional CLI args. Mixing the two on
+            # the same command is a usage error (two conflicting intents).
             iso_start = settings.start_iso_datetime
             iso_end = settings.end_iso_datetime
             has_iso = bool(iso_start or iso_end)
@@ -1306,16 +1351,32 @@ def main():
                     )
                     exit(1)
             else:
-                start, end = convert_input_to_datetime(
-                    settings.date, settings.start_time, settings.end_time
-                )
+                if not (settings.date and settings.start_time and settings.end_time):
+                    reporter.error(
+                        "ConfigError",
+                        (
+                            "extract needs a time range. Provide the positional "
+                            "date, start, and end (e.g. `5/27 6pm 7pm`), or the "
+                            "--start-iso-datetime / --end-iso-datetime pair."
+                        ),
+                    )
+                    exit(1)
+                try:
+                    start, end = convert_input_to_datetime(
+                        settings.date, settings.start_time, settings.end_time
+                    )
+                except (ValueError, OverflowError) as exc:
+                    reporter.error(
+                        "ConfigError",
+                        f"Could not parse the date/time range: {exc}",
+                    )
+                    exit(1)
 
-            # If the user didn't pass -o (and `runtime.filename` wasn't
-            # set in the config either), build the canonical default
-            # output stem from the same shared helper the web service
-            # uses. Without this the exacqvision server picks the
-            # filename via Content-Disposition, which is unpredictable
-            # and doesn't sort by date the way our convention does.
+            # If the user didn't pass -o, build the canonical default output
+            # stem from the same shared helper the web service uses. Without
+            # this the exacqvision server picks the filename via
+            # Content-Disposition, which is unpredictable and doesn't sort by
+            # date the way our convention does.
             #
             # Mutating settings here (rather than threading a local
             # through) keeps the rest of the extract pipeline -- which
@@ -1436,12 +1497,11 @@ def main():
 
             # Pre-flight resolution checks -- fail fast with a clear message
             # before any network I/O, reusing the same error taxonomy as
-            # extract. `Settings` has already resolved server/camera from
-            # args > [runtime] config.
+            # extract. `Settings` resolves server/camera from CLI args.
             if not settings.server:
                 reporter.error(
                     "ConfigError",
-                    "No server selected. Pass --server or set [runtime].server in the config.",
+                    "No server selected. Pass --server <name> (must match a top-level [<server>] table in the config).",
                 )
                 exit(1)
             if not settings.server_ip:

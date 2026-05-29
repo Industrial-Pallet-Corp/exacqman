@@ -37,16 +37,16 @@ from progress import get_reporter
 
 # Top-level tables that are NOT servers. Every other top-level table in the
 # config is treated as a server (see split_servers_and_cameras).
-RESERVED_TABLES = frozenset({"settings", "runtime"})
+RESERVED_TABLES = frozenset({"settings"})
 
 
 def split_servers_and_cameras(config: dict) -> tuple[dict[str, str], dict[str, dict]]:
     """Split a parsed config into its server-URL map and cameras-by-server map.
 
-    Schema (flat form): each top-level table other than ``[settings]`` /
-    ``[runtime]`` is a server. Inside a server table, the scalar ``url`` key is
-    the server URL and every *dict-valued* sub-table (``[<server>.<alias>]``) is
-    a camera, keyed by alias with an ``id`` and optional ``crop_dimensions``.
+    Schema (flat form): each top-level table other than ``[settings]`` is a
+    server. Inside a server table, the scalar ``url`` key is the server URL and
+    every *dict-valued* sub-table (``[<server>.<alias>]``) is a camera, keyed by
+    alias with an ``id`` and optional ``crop_dimensions``.
 
     Returns:
         ``(servers_by_name, cameras_by_server)`` where ``servers_by_name`` is
@@ -232,7 +232,7 @@ def validate_config(config: dict) -> bool:
         return False
 
     # Servers and their cameras. Each top-level table other than the reserved
-    # [settings] / [runtime] is a server, with a scalar `url` and dict-valued
+    # [settings] is a server, with a scalar `url` and dict-valued
     # camera sub-tables ([<server>.<alias>]). split_servers_and_cameras() is the
     # single source of truth for that mapping; here we re-walk the raw tables so
     # we can report shape problems (bad url, bad id, reserved name) precisely.
@@ -299,35 +299,17 @@ def validate_config(config: dict) -> bool:
     elif not isinstance(font_weight, int) or isinstance(font_weight, bool) or font_weight <= 0:
         fatal_errors.append('settings.font_weight must be a positive integer')
 
-    default_crop = settings_table.get('default_crop_dimensions')
-    if default_crop is not None and not _is_valid_crop(default_crop):
+    default_crop = settings_table.get('default_crop')
+    if default_crop is not None and not isinstance(default_crop, bool):
+        fatal_errors.append(
+            f'settings.default_crop must be a boolean (got {type(default_crop).__name__})'
+        )
+
+    default_crop_dimensions = settings_table.get('default_crop_dimensions')
+    if default_crop_dimensions is not None and not _is_valid_crop(default_crop_dimensions):
         fatal_errors.append(
             'settings.default_crop_dimensions must be [[x, y], [w, h]] with integer values'
         )
-
-    # [runtime] is optional, but when present, cross-check its server/camera
-    # references against the declared servers/cameras above.
-    runtime = config.get('runtime', {})
-    if isinstance(runtime, dict):
-        runtime_server = runtime.get('server')
-        if runtime_server is not None and runtime_server not in cameras_by_server:
-            fatal_errors.append(
-                f'runtime.server "{runtime_server}" is not defined as a top-level [<name>] table'
-            )
-        else:
-            runtime_alias = runtime.get('camera_alias')
-            if runtime_server and runtime_alias is not None:
-                srv_cameras = cameras_by_server.get(runtime_server, {})
-                if str(runtime_alias) not in {str(k) for k in srv_cameras.keys()}:
-                    fatal_errors.append(
-                        f'runtime.camera_alias "{runtime_alias}" is not defined as a '
-                        f'[{runtime_server}.{runtime_alias}] table'
-                    )
-
-        if 'crop' in runtime and not isinstance(runtime['crop'], bool):
-            fatal_errors.append(
-                f'runtime.crop must be a boolean (got {type(runtime["crop"]).__name__})'
-            )
 
     credentials_file = settings_table.get('credentials_file')
     if credentials_file is not None and (

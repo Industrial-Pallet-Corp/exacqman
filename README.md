@@ -25,7 +25,6 @@ For API testing, [explore the Postman collection](https://weareipc.postman.co/wo
    - **[Network]**: List server names and their IP addresses.
    - **[Cameras]**: Map camera aliases to their IDs.
    - **[Settings]**: Configure `timezone`, `timelapse_multiplier` (positive integer), `compression_level` (`low`, `medium`, or `high`), `crop_dimensions` (leave blank for interactive cropping), and `font_weight` (positive integer for timestamp thickness).
-   - **[Runtime]**: Optionally set defaults for `server`, `camera_alias`, `filename`, `date`, `start_time`, and `end_time`.
 4. Save the config file.
 
 ## Usage
@@ -48,10 +47,10 @@ python exacqman.py [-h | --help] <command> [<args>]
 #### Extract Mode
 
 ```bash
-python exacqman.py extract [camera_alias] [date] [start] [end] [config_file] [--server SERVER] [-o OUTPUT_NAME] [--quality {low,medium,high}] [--multiplier MULTIPLIER] [-c]
+python exacqman.py extract camera_alias [date] [start] [end] [config_file] [--server SERVER] [-o OUTPUT_NAME] [--quality {low,medium,high}] [--multiplier MULTIPLIER] [-c {true,false}]
 ```
 
-- `camera_alias`: Camera name (e.g., "front_door").
+- `camera_alias`: Camera name (e.g., "front_door"). Required.
 - `date`: Date in MM/DD format (e.g., "3/11"). Use the start date if footage spans midnight.
 - `start`: Start time (e.g., "6pm", "18:30").
 - `end`: End time (e.g., "8pm", "20:00").
@@ -59,11 +58,11 @@ python exacqman.py extract [camera_alias] [date] [start] [end] [config_file] [--
 - `--config`: Flag-form alternative to the positional `config_file`. Handy for programmatic callers that prefer named flags over positional ordering.
 - `--start-iso-datetime` / `--end-iso-datetime`: ISO 8601 datetimes (e.g. `2026-05-27T09:30:00`, or with offset `2026-05-27T09:30:00-04:00`). When provided together, they replace the positional `date`/`start`/`end` form -- no year inference, no day rollover heuristic, full second-level precision. Intended for programmatic callers (the web UI uses these); humans should keep using the positional form. Cannot be combined with the positional `date`/`start`/`end` arguments on the same command.
 - `--server`: Server name (e.g., "ch" for Clark Hill).
-- `-o, --output_name`: Output file path. When omitted (and `runtime.filename` is unset in the config), the CLI builds a canonical default of the form `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` so filenames are deterministic and sort by date.
+- `-o, --output_name`: Output file path. When omitted, the CLI builds a canonical default of the form `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` so filenames are deterministic and sort by date.
 - `--output-dir`: Directory to deliver the final extracted video into. When set, the pipeline writes its raw download, timelapsed, and compressed files into this directory; on successful completion, the intermediates are removed and the compressed file is renamed to bare `{name}.mp4` so the directory ends up holding exactly one user-facing deliverable. When omitted, behavior is unchanged: all three files land in the current working directory with their stem-based names (including the codec suffix on the compressed file). Intended for programmatic callers; humans typically `cd` into their target directory and omit this.
 - `--quality`: Compression quality (`low`, `medium`, `high`).
 - `--multiplier`: Timelapse speed factor (positive integer).
-- `-c, --crop`: Enable cropping (interactive if `crop_dimensions` not set).
+- `-c, --crop {true,false}`: Whether to crop the video. When omitted, defers to `[settings].default_crop` in the config. When cropping, uses per-camera `crop_dimensions`, falling back to `[settings].default_crop_dimensions`; prompts interactively if neither is set.
 
 #### Compress Mode
 
@@ -78,13 +77,13 @@ python exacqman.py compress video_filename quality [-o OUTPUT_NAME]
 #### Timelapse Mode
 
 ```bash
-python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c]
+python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c {true,false}]
 ```
 
 - `video_filename`: Input video file path.
 - `multiplier`: Timelapse speed factor (positive integer).
 - `-o, --output_name`: Output file path.
-- `-c, --crop`: Enable cropping.
+- `-c, --crop {true,false}`: Whether to crop the video.
 
 #### Crop Mode
 
@@ -98,7 +97,7 @@ Grabs a short clip from approximately the current moment, opens the interactive 
 - `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
 - `--config`: Flag-form alternative to the positional `config_file`.
 - `--credentials`: Path to TOML credentials file. Overrides `settings.credentials_file` in the config.
-- `--server`: Server name (must match a top-level `[<server>]` table). Falls back to `[runtime].server`.
+- `--server`: Server name (must match a top-level `[<server>]` table).
 - `--lookback-minutes`: How far back from now to request the probe clip, in minutes (default: 15). Increase this if the camera is motion-triggered and has no recent footage.
 
 Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI window and therefore requires a display.
@@ -107,7 +106,7 @@ Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI w
 
 - Extract video from a camera for March 11, 6 PM to 8 PM, with config and cropping:
   ```bash
-  python exacqman.py extract front_door 3/11 6pm 8pm mydefault.config --server ch --output_name output.mp4 --quality medium --multiplier 10 --crop
+  python exacqman.py extract front_door 3/11 6pm 8pm mydefault.config --server ch --output_name output.mp4 --quality medium --multiplier 10 --crop true
   ```
 - Compress a video to medium quality:
   ```bash
@@ -115,7 +114,7 @@ Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI w
   ```
 - Create a 5x timelapse video:
   ```bash
-  python exacqman.py timelapse input.mp4 5 --output_name timelapse.mp4 --crop
+  python exacqman.py timelapse input.mp4 5 --output_name timelapse.mp4 --crop true
   ```
 - Capture crop dimensions for a camera (opens the selector on a recent frame):
   ```bash
@@ -124,7 +123,7 @@ Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI w
 
 ## Configuration File
 
-The config file (`default.config` template) is a TOML file. Authentication lives in a separate credentials file (see `sample.credentials`). `[settings]` and `[runtime]` are reserved tables; every other top-level table is a server (e.g. `[ch]`, `[gpa]`) with a `url`. Cameras are sub-tables of their server, written as `[<server>.<alias>]`, so the same alias can be reused across servers without ID collisions.
+The config file (`default.config` template) is a TOML file holding program defaults; per-run values (server, camera, time range, output name) are supplied as CLI arguments. Authentication lives in a separate credentials file (see `sample.credentials`). `[settings]` is the reserved table for defaults. Every other top-level table is a server (e.g. `[ch]`, `[gpa]`) with a `url`. Cameras are sub-tables of their server, written as `[<server>.<alias>]`, so the same alias can be reused across servers without ID collisions.
 
 ```toml
 [settings]
@@ -133,16 +132,8 @@ timezone = "America/Indiana/Indianapolis"
 timelapse_multiplier = 50
 compression_level = "high"
 font_weight = 4
+default_crop = true
 default_crop_dimensions = [[0, 0], [1920, 1080]]
-
-[runtime]
-server = "ch"
-camera_alias = "front_door"
-filename = "output"
-date = "3/11"
-start_time = "6pm"
-end_time = "8pm"
-crop = true
 
 [ch]
 url = "http://192.168.1.100"
@@ -158,8 +149,9 @@ crop_dimensions = [[624, 14], [666, 766]]
 id = 2
 ```
 
-- Server names must not be `settings` or `runtime` (those tables are reserved), and must not contain `.`.
+- Server names must not be `settings` (that table is reserved), and must not contain `.`.
 - Each server table needs a non-empty `url`; each camera sub-table needs a positive-integer `id`.
+- `default_crop` (boolean) sets whether extracts/timelapses crop by default. Override per-run with `--crop true` / `--crop false`.
 - Omit a camera's `crop_dimensions` to fall back to `[settings].default_crop_dimensions`; omit both to select interactively during runtime (the `crop` subcommand outputs a line you can paste back in).
 - `crop_dimensions` are `[[x, y], [width, height]]` arrays of integers.
 - Ensure `timelapse_multiplier` and `font_weight` are positive integers.
