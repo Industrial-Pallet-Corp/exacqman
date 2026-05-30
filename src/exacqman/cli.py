@@ -4,18 +4,20 @@ from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as duparse
 from zoneinfo import ZoneInfo
-from exacqvision import Exacqvision, ExacqvisionError
+from exacqman.exacqvision import Exacqvision, ExacqvisionError
 from requests.exceptions import RequestException
-from exacqman_naming import default_output_stem
-from exacqman_config import (
+from exacqman.exacqman_naming import default_output_stem
+from exacqman.exacqman_config import (
     import_config,
     import_credentials,
     resolve_credentials_path,
     split_servers_and_cameras,
 )
-from progress import init_reporter, get_reporter
+from exacqman.progress import init_reporter, get_reporter
+from exacqman import paths
 import argparse
 import cv2
+import importlib.resources
 import json
 import os
 import shutil
@@ -26,13 +28,6 @@ import tomllib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
-# Project root (this file lives at the repo root). Scratch files are kept in a
-# project-local, gitignored directory rather than the system temp dir so they
-# never escape the project tree -- handy on locked-down machines and for
-# predictable cleanup.
-PROJECT_ROOT = Path(__file__).resolve().parent
-TEMP_DIR = PROJECT_ROOT / ".tmp"
 
 # Length of the throwaway clip the `crop` subcommand exports just to grab a
 # single frame for the ROI selector. Kept tiny on purpose: the camera framing
@@ -928,6 +923,18 @@ def parse_arguments():
         help='How far back from now to request the probe clip, in minutes (default: 15). Increase if the camera is motion-triggered and has no recent footage.',
     )
 
+    # Init subcommand: scaffold a config + credentials file into the standard
+    # config directory (Homebrew etc/exacqman or ~/.config/exacqman) from the
+    # bundled templates, so a fresh install has somewhere to start.
+    init_parser = subparsers.add_parser(
+        'init',
+        help='Scaffold a config + credentials file into the standard config directory.',
+    )
+    init_parser.add_argument(
+        '--force', '-f', action='store_true',
+        help='Overwrite existing files in the config directory.',
+    )
+
     return arg_parser.parse_args()
 
 
@@ -1184,6 +1191,78 @@ def convert_input_to_datetime(date: str, start: str, end: str) -> tuple[datetime
 
 settings = None
 
+def _resolve_config_path(explicit: "str | None") -> "str | None":
+    """Resolve which config file this run should use.
+
+    With an explicit value (positional or ``--config``): use it as-is if it's
+    absolute or exists relative to the cwd; otherwise treat it as a bare name
+    and look it up among the discovered config files (config dir, then cwd),
+    falling back to ``config_dir()/<name>`` so a typo still produces a clear
+    not-found error rather than silently doing nothing.
+
+    With no explicit value: auto-discover. Prefer ``default.config``, else the
+    first file found (config dir before cwd). Returns ``None`` when nothing is
+    discoverable, leaving config-requiring commands to error clearly.
+    """
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if candidate.is_absolute() or candidate.exists():
+            return str(candidate)
+        for found in paths.iter_config_files():
+            if found.name == explicit:
+                return str(found)
+        return str(paths.config_dir() / explicit)
+
+    discovered = paths.iter_config_files()
+    if not discovered:
+        return None
+    for found in discovered:
+        if found.name == "default.config":
+            return str(found)
+    return str(discovered[0])
+
+
+def _cmd_init(args) -> int:
+    """Scaffold config + credentials into the standard config directory.
+
+    Copies the bundled ``default.config`` and ``sample.credentials`` templates
+    (accessed via ``importlib.resources`` so it works from an installed wheel)
+    into ``paths.config_dir()``. The credentials file is written ``0600`` since
+    it's intended to hold shared-service auth. Existing files are kept unless
+    ``--force`` is given.
+    """
+    cfg_dir = paths.ensure_dir(paths.config_dir())
+    data = importlib.resources.files("exacqman.data")
+    lines: list[str] = []
+
+    target_config = cfg_dir / "default.config"
+    if target_config.exists() and not args.force:
+        lines.append(f"  kept (exists): {target_config}")
+    else:
+        target_config.write_bytes((data / "default.config").read_bytes())
+        lines.append(f"  wrote: {target_config}")
+
+    # sample.credentials -> default.credentials, beside the config so the
+    # default `credentials_file` resolution finds it. 0600 because it holds auth.
+    target_credentials = cfg_dir / "default.credentials"
+    if target_credentials.exists() and not args.force:
+        lines.append(f"  kept (exists): {target_credentials}")
+    else:
+        target_credentials.write_bytes((data / "sample.credentials").read_bytes())
+        os.chmod(target_credentials, 0o600)
+        lines.append(f"  wrote: {target_credentials}  (chmod 600)")
+
+    print(f"ExacqMan config directory: {cfg_dir}")
+    print("\n".join(lines))
+    print(
+        "\nNext steps:\n"
+        f"  1. Edit {target_config} with your servers and cameras.\n"
+        f"  2. Put your ExacqVision username/password in {target_credentials}.\n"
+        "  3. Run `exacqman extract ...` from any directory."
+    )
+    return 0
+
+
 def main():
     """
     Main entry point for video processing script.
@@ -1202,6 +1281,11 @@ def main():
     # Initialize the global progress reporter as early as possible so any
     # downstream code path (including config errors) can use it.
     reporter = init_reporter(format=args.progress_format, quiet=args.quiet)
+
+    # `init` scaffolds config files and needs no config of its own; handle it
+    # before any config resolution.
+    if args.command == 'init':
+        sys.exit(_cmd_init(args))
 
     config = None
 
@@ -1223,7 +1307,11 @@ def main():
             ),
         )
         exit(1)
-    config_file = positional_config or flag_config
+    # Resolve to an explicit path: an explicit value is located in the config
+    # dir / cwd when it's a bare name; with no value we auto-discover a
+    # *.config from the standard config dir (then cwd) so the tool works from
+    # any directory after `exacqman init`.
+    config_file = _resolve_config_path(positional_config or flag_config)
     # Mirror the resolved value back onto args so the rest of main() sees a
     # consistent `args.config_file` regardless of which form the caller used.
     args.config_file = config_file
@@ -1535,11 +1623,9 @@ def main():
                 f"Searching the last {lookback} min for footage from {settings.camera_alias}",
             )
 
-            # Probe clip lives in a project-local scratch dir that's cleaned
-            # automatically -- never the system temp dir, so nothing lands
-            # outside the project. It exists only to hand one frame to the selector.
-            TEMP_DIR.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix="exacqman_crop_", dir=TEMP_DIR) as tmp_dir:
+            # Probe clip lives in an auto-cleaned temp dir. It exists only to
+            # hand one frame to the selector and is removed on context exit.
+            with tempfile.TemporaryDirectory(prefix="exacqman_crop_") as tmp_dir:
                 # Construct inside the try so a login/connection failure
                 # surfaces as the same friendly ExacqvisionError message
                 # (the Exacqvision constructor logs in eagerly). RequestException

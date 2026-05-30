@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.exceptions import RequestException
 
-from progress import init_reporter, get_reporter
+from exacqman.progress import init_reporter, get_reporter
 
 
 class ExacqvisionError(Exception):
@@ -778,7 +778,7 @@ def main() -> None:
     # Local import to avoid forcing the library half of this module to pull
     # in tomllib / config validation just for `from exacqvision import
     # Exacqvision`. The CLI half is the only consumer.
-    from exacqman_config import (
+    from exacqman.exacqman_config import (
         import_config,
         import_credentials,
         resolve_credentials_path,

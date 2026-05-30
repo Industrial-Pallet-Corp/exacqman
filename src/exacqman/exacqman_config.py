@@ -32,7 +32,7 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
-from progress import get_reporter
+from exacqman.progress import get_reporter
 
 
 # Top-level tables that are NOT servers. Every other top-level table in the

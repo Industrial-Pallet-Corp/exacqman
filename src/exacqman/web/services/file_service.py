@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
-from api.models import FileInfo
+from exacqman import paths
+from exacqman.web.api.models import FileInfo
 
 try:
     from mutagen.mp4 import MP4, MP4StreamInfoError
@@ -43,11 +44,11 @@ class FileService:
     
     def __init__(self):
         """Initialize the file service."""
-        # Exports live at the project root (<root>/exports), shared with the
-        # CLI and JobQueue. Resolve from this file's location so the path is
-        # correct regardless of the working directory the server is launched
-        # from. From backend/services/, go up four levels to reach the root.
-        self.exports_dir = Path(__file__).resolve().parent.parent.parent.parent / "exports"
+        # Exports dir is shared with the CLI and JobQueue and resolved via
+        # exacqman.paths (cwd's exports/ for a foreground server, or
+        # EXACQMAN_EXPORTS_DIR for a managed service) so an installed,
+        # read-only package never writes into its own tree.
+        self.exports_dir = paths.exports_dir()
         self.allowed_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv'}
         
         # Ensure exports directory exists

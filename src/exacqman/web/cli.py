@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
 """
-ExacqMan Web -- start / stop / status entrypoint.
+exacqman-web -- start / stop / status entrypoint.
 
 A single, symmetrical control script for the FastAPI app under uvicorn:
 
-    python backend/exacqman_web.py start  [--port/-p N] [--host ADDR] [--reload/-r] [--background/-b]
-    python backend/exacqman_web.py stop
-    python backend/exacqman_web.py status
+    exacqman-web start  [--port/-p N] [--host ADDR] [--reload/-r]
+    exacqman-web stop
+    exacqman-web status
 
-The subcommand is optional and defaults to ``start``, so the historical
-``python backend/exacqman_web.py`` invocation still just boots the server in
-the foreground.
+The subcommand is optional and defaults to ``start``.
 
 Process model
 -------------
-``start`` runs uvicorn as a single foreground process by default (logs stream
-to the terminal; Ctrl-C triggers uvicorn's graceful shutdown, which runs the
-FastAPI lifespan ``shutdown_event`` -> ``JobQueue.stop()`` before the process
-exits and releases the port). The running PID, host, and port are recorded in
-a small JSON PID file so ``stop`` / ``status`` can find the server later --
-from any terminal -- without hunting through ``ps``/``lsof`` by hand.
+``start`` runs uvicorn as a single foreground process (logs stream to the
+terminal; Ctrl-C triggers uvicorn's graceful shutdown, which runs the FastAPI
+lifespan ``shutdown_event`` -> ``JobQueue.stop()`` before the process exits and
+releases the port). The running PID, host, and port are recorded in a small
+JSON PID file so ``stop`` / ``status`` can find the server later -- from any
+terminal -- without hunting through ``ps``/``lsof`` by hand.
 
-``--background/-b`` re-launches this same script in foreground mode as a
-detached child (new session, output redirected to a log file) and returns
-immediately. The child owns the PID file, so the file always points at the
-real uvicorn process regardless of how it was started.
+Running unattended (auto-restart, start-at-login, a background service) is
+delegated to the OS service manager rather than a hand-rolled daemon: a clean
+foreground process is exactly what ``brew services`` (launchd on macOS,
+systemd on Linux) supervises via the formula's ``service`` block. There is no
+``--background`` flag -- ``brew services start exacqman`` is the supported way
+to run it detached.
 
 ``stop`` reads the PID file and sends SIGTERM to the process group (catching a
-detached session or a ``--reload`` watcher+worker), waits up to a fixed grace
-period for a clean exit, then escalates to SIGKILL. If the PID file is missing
-or stale, it falls back to discovering the listener on the port via ``lsof``.
-Either way it confirms the port is free before reporting success.
+``--reload`` watcher+worker), waits up to a fixed grace period for a clean
+exit, then escalates to SIGKILL. If the PID file is missing or stale, it falls
+back to discovering the listener on the port via ``lsof``. Either way it
+confirms the port is free before reporting success.
 
 ``--reload`` remains development-only: it spawns a watcher + worker that both
 inherit the listening socket. ``stop`` handles that because it signals the
@@ -53,43 +53,23 @@ from pathlib import Path
 
 import uvicorn
 
-backend_dir = Path(__file__).resolve().parent
+from exacqman import paths
 
-# Make the ExacqMan project root importable so backend modules can pull in
-# shared helpers that live alongside the CLI (e.g. ``exacqman_naming``).
-# Layout: <project_root>/exacqman-web/backend/exacqman_web.py -> root is two
-# levels up. Insert *after* backend_dir so backend-local imports still win if
-# there's ever a name collision.
-project_root = backend_dir.parent.parent
-sys.path.insert(0, str(backend_dir))
-sys.path.insert(1, str(project_root))
-
-# Runtime state lives in the already-gitignored web logs directory -- the same
-# directory the job queue uses for per-job logs (UUID ``{job_id}.log`` stems),
-# so ``server.pid`` / ``server.log`` won't collide. Absolute paths derived from
-# ``__file__`` so they're stable regardless of the process's CWD (``start``
-# chdir's into the backend dir for uvicorn's relative static mounts).
-RUNTIME_DIR = backend_dir.parent / "logs"
+# Runtime state (the PID file) lives in the log dir resolved by exacqman.paths
+# (Homebrew ``var/log`` or the XDG state dir), the same directory the job queue
+# writes per-job logs into (UUID ``{job_id}.log`` stems), so ``server.pid``
+# won't collide. Resolved at import so it's stable regardless of the process's
+# cwd.
+RUNTIME_DIR = paths.log_dir()
 PID_FILE = RUNTIME_DIR / "server.pid"
-SERVER_LOG = RUNTIME_DIR / "server.log"
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8887
-
-# Internal marker the `--background` parent sets so the detached child (which
-# runs the normal foreground path) records its mode as "background" in the PID
-# file. Keeps the public CLI clean -- no hidden flag -- while making `status`
-# truthful about how the server was launched.
-_BACKGROUND_ENV = "EXACQMAN_WEB_BACKGROUND"
 
 # How long `stop` waits for a graceful exit before escalating to SIGKILL.
 # Comfortably above the 8s `JobQueue.stop()` bound in the FastAPI lifespan so
 # an in-flight job teardown has room to finish cleanly.
 STOP_GRACE_SECONDS = 15
-
-# How long the `--background` parent waits for the child to come up (PID file
-# written + port accepting connections) before giving up and reporting.
-BACKGROUND_WAIT_SECONDS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +195,7 @@ def _signal_pid_group(pid: int, sig: int) -> bool:
     """Send ``sig`` to ``pid``'s process group, falling back to the bare PID.
 
     Returns False if the target is already gone. Targeting the group catches a
-    detached session (``--background``) and a ``--reload`` watcher+worker in
-    one shot.
+    ``--reload`` watcher+worker (or a service-supervised session) in one shot.
     """
     try:
         pgid = os.getpgid(pid)
@@ -244,7 +223,7 @@ def _signal_pid_group(pid: int, sig: int) -> bool:
 # ---------------------------------------------------------------------------
 
 def cmd_start(args: argparse.Namespace) -> int:
-    """Start the server -- foreground by default, detached with --background."""
+    """Start the server in the foreground."""
     host, port = args.host, args.port
 
     # Already-running guard: a live PID file on the same port means there's a
@@ -255,7 +234,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         print(
             f"ExacqMan Web is already running (PID {existing['pid']}) on "
             f"{_url(existing.get('host', host), existing.get('port', port))}\n"
-            f"Use 'python {_self_invocation()} stop' to stop it first.",
+            f"Use '{_self_invocation()} stop' to stop it first.",
             file=sys.stderr,
         )
         return 1
@@ -263,22 +242,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         # Dead PID recorded -- clean it up before we (re)start.
         _clear_pidfile()
 
-    if args.background:
-        return _start_background(host, port, args.reload)
-
     return _start_foreground(host, port, args.reload)
 
 
 def _start_foreground(host: str, port: int, reload: bool) -> int:
     """Run uvicorn in this process, owning the PID file for our lifetime."""
-    os.chdir(backend_dir)
-
-    if os.environ.get(_BACKGROUND_ENV) == "1":
-        mode = "background"
-    elif reload:
-        mode = "reload"
-    else:
-        mode = "foreground"
+    mode = "reload" if reload else "foreground"
     _write_pidfile(os.getpid(), host, port, mode)
 
     print(
@@ -288,7 +257,7 @@ def _start_foreground(host: str, port: int, reload: bool) -> int:
 
     try:
         uvicorn.run(
-            "app:app",
+            "exacqman.web.app:app",
             host=host,
             port=port,
             reload=reload,
@@ -302,75 +271,6 @@ def _start_foreground(host: str, port: int, reload: bool) -> int:
         current = _read_pidfile()
         if current and int(current.get("pid", -1)) == os.getpid():
             _clear_pidfile()
-    return 0
-
-
-def _start_background(host: str, port: int, reload: bool) -> int:
-    """Spawn a detached copy of ourselves in foreground mode and report.
-
-    The child runs ``_start_foreground`` and writes the PID file with *its*
-    PID, so the file always reflects the real uvicorn process. We just wait
-    for it to come up and print a friendly summary.
-    """
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-
-    child_cmd = [sys.executable, str(Path(__file__).resolve()), "start",
-                 "--host", host, "--port", str(port)]
-    if reload:
-        child_cmd.append("--reload")
-
-    log_handle = open(SERVER_LOG, "a")
-    try:
-        log_handle.write(
-            f"\n===== ExacqMan Web (background) started {datetime.now().isoformat(timespec='seconds')} "
-            f"on {host}:{port} =====\n"
-        )
-        log_handle.flush()
-        child_env = {**os.environ, _BACKGROUND_ENV: "1"}
-        proc = subprocess.Popen(
-            child_cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # detach: closing the shell won't SIGHUP it
-            cwd=str(backend_dir),
-            env=child_env,
-        )
-    finally:
-        # The child inherits its own dup'd fd; we can close our handle.
-        log_handle.close()
-
-    # Wait for the child to record itself and the port to come up. We confirm
-    # via the PID file (written by the child) and a live port, not the Popen
-    # pid, because in reload mode the meaningful PID is uvicorn's.
-    def _up() -> bool:
-        rec = _read_pidfile()
-        return bool(rec) and _pid_alive(int(rec["pid"])) and not _port_free(host, port)
-
-    if not _wait_until(_up, BACKGROUND_WAIT_SECONDS):
-        # Did the spawned process die immediately?
-        if proc.poll() is not None:
-            print(
-                f"ExacqMan Web failed to start in the background (exit code "
-                f"{proc.returncode}). Check the log: {_rel(SERVER_LOG)}",
-                file=sys.stderr,
-            )
-            return 1
-        print(
-            f"ExacqMan Web was launched (PID {proc.pid}) but didn't confirm "
-            f"healthy within {BACKGROUND_WAIT_SECONDS}s. Check status / the "
-            f"log: {_rel(SERVER_LOG)}",
-            file=sys.stderr,
-        )
-        return 1
-
-    rec = _read_pidfile() or {}
-    pid = rec.get("pid", proc.pid)
-    print(
-        f"ExacqMan Web started in background (PID {pid}) -> {_url(host, port)}\n"
-        f"  logs: {_rel(SERVER_LOG)}\n"
-        f"  stop: python {_self_invocation()} stop"
-    )
     return 0
 
 
@@ -479,29 +379,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def _self_invocation() -> str:
-    """Best-effort 'backend/exacqman_web.py' style path for help text."""
-    try:
-        return str(Path(__file__).resolve().relative_to(Path.cwd()))
-    except ValueError:
-        return "backend/exacqman_web.py"
-
-
-def _rel(path: Path) -> str:
-    """Render ``path`` relative to CWD when possible, else absolute."""
-    try:
-        return str(path.resolve().relative_to(Path.cwd()))
-    except ValueError:
-        return str(path)
+    """Console-script name for help text."""
+    return "exacqman-web"
 
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     """Build the start/stop/status CLI.
 
-    The subcommand is optional and defaults to ``start`` (preserves the
-    historical bare ``python exacqman_web.py`` = start-in-foreground behavior).
+    The subcommand is optional and defaults to ``start`` (so a bare
+    ``exacqman-web`` boots the server in the foreground).
     """
     parser = argparse.ArgumentParser(
-        prog="exacqman_web.py",
+        prog="exacqman-web",
         description="Start, stop, or check the ExacqMan Web server.",
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -526,10 +415,6 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
             "clean shutdown."
         ),
     )
-    start_p.add_argument(
-        "--background", "-b", action="store_true",
-        help="Detach and run in the background; logs go to logs/server.log.",
-    )
 
     subparsers.add_parser("stop", help="Stop the running server and free the port.")
     subparsers.add_parser("status", help="Report whether the server is running.")
@@ -543,7 +428,6 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         args.port = DEFAULT_PORT
         args.host = DEFAULT_HOST
         args.reload = False
-        args.background = False
 
     return args
 
