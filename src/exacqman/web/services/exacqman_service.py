@@ -9,11 +9,13 @@ import json
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import Dict, Any, Callable, NamedTuple, Optional
 
-from api.models import ExtractRequest
-from exacqman_naming import default_output_stem, sanitize_filename_component
+from exacqman import paths
+from exacqman.web.api.models import ExtractRequest
+from exacqman.exacqman_naming import default_output_stem, sanitize_filename_component
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +119,29 @@ class ExacqManService:
     """Service for interacting with ExacqMan CLI tool."""
     
     def __init__(self):
-        """Initialize the ExacqMan service."""
-        # exacqman.py is always at the same level as exacqman-web directory
-        # From backend/services/exacqman_service.py, go up 3 levels to reach ExacqMan root
-        self.exacqman_path = str(Path(__file__).parent.parent.parent.parent / "exacqman.py")
-        self.working_directory = Path(__file__).parent.parent.parent.parent  # ExacqMan root directory
+        """Initialize the ExacqMan service.
+
+        Stateless: the CLI is invoked as an installed module
+        (``python -m exacqman``) and all runtime locations come from
+        ``exacqman.paths``, so there's nothing package-relative to resolve here.
+        """
+
+    @staticmethod
+    def _resolve_config_path(config_file: str) -> Path:
+        """Resolve a config name/path to an absolute file for ``--config``.
+
+        Absolute paths pass through; a bare name is matched against the
+        discovered config files (config dir, then cwd), falling back to
+        ``config_dir()/<name>``. Passing an absolute path means the spawned
+        CLI doesn't depend on inheriting any particular cwd.
+        """
+        path = Path(config_file)
+        if path.is_absolute():
+            return path
+        for candidate in paths.iter_config_files():
+            if candidate.name == config_file:
+                return candidate
+        return paths.config_dir() / config_file
     
     async def extract_video_with_progress(self, request: ExtractRequest, progress_callback: Callable[..., None]) -> Dict[str, Any]:
         """
@@ -137,7 +157,8 @@ class ExacqManService:
         cmd_args = []
         try:
             output_filename = self._generate_output_filename(request)
-            exports_dir = (self.working_directory / "exports").resolve()
+            exports_dir = paths.ensure_dir(paths.exports_dir()).resolve()
+            config_path = self._resolve_config_path(request.config_file)
 
             # Build command arguments. We use flag forms exclusively (except for
             # the leading `camera_alias` positional) so the call is unambiguous
@@ -164,12 +185,19 @@ class ExacqManService:
             #
             # -u runs Python unbuffered so events stream in real time.
             # --progress-format=json makes the CLI emit one JSON event per line.
+            #
+            # Invoke the installed CLI via ``sys.executable -m exacqman`` (not a
+            # package-relative file path): this runs the same interpreter /
+            # environment the web server runs in and works regardless of where
+            # the package is installed. ``--config`` is passed as an absolute
+            # path and ``--output-dir`` as the resolved exports dir so the
+            # child never depends on inheriting a particular cwd.
             cmd_args = [
-                "python3", "-u", self.exacqman_path,
+                sys.executable, "-u", "-m", "exacqman",
                 "--progress-format=json",
                 "extract",
                 request.camera_alias,
-                "--config", request.config_file,
+                "--config", str(config_path),
                 "--start-iso-datetime", request.start_datetime.isoformat(),
                 "--end-iso-datetime", request.end_datetime.isoformat(),
                 "--multiplier", str(request.timelapse_multiplier),
@@ -185,8 +213,8 @@ class ExacqManService:
                 cmd_args.extend(["--caption", request.caption])
 
             logger.info(f"Running extract command: {' '.join(cmd_args)}")
-            logger.info(f"Working directory: {self.working_directory}")
-            logger.info(f"Config file: {request.config_file}")
+            logger.info(f"Working directory: {exports_dir}")
+            logger.info(f"Config file: {config_path}")
 
             progress_callback(0, "Starting video extraction...")
 
@@ -200,7 +228,7 @@ class ExacqManService:
             # See `_terminate_subprocess_if_alive` for the teardown half.
             process = await asyncio.create_subprocess_exec(
                 *cmd_args,
-                cwd=self.working_directory,
+                cwd=str(exports_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,  # Combine stderr with stdout
                 start_new_session=True,
@@ -263,7 +291,7 @@ class ExacqManService:
                 # be absolute or relative to the CLI's cwd) and pass
                 # it through.
                 final_path = str(
-                    (self.working_directory / cli_result.output_path).resolve()
+                    (exports_dir / cli_result.output_path).resolve()
                 )
 
                 return {
@@ -281,7 +309,6 @@ class ExacqManService:
             logger.error(f"Error in extract_video_with_progress: {error_type}: {error_message}")
             if cmd_args:
                 logger.error(f"Command that failed: {' '.join(cmd_args)}")
-            logger.error(f"Working directory: {self.working_directory}")
             progress_callback(0, f"Error: {str(e)}")
             raise
 
@@ -612,10 +639,7 @@ class ExacqManService:
             True if valid, False otherwise
         """
         try:
-            if not config_path.startswith('/'):
-                config_path = str(self.working_directory / config_path)
-            
-            return Path(config_path).exists()
+            return self._resolve_config_path(config_path).exists()
         except Exception as e:
             logger.error(f"Error validating config file {config_path}: {str(e)}")
             return False
@@ -628,10 +652,7 @@ class ExacqManService:
             List of configuration file paths
         """
         try:
-            config_files = []
-            for file_path in self.working_directory.glob("*.config"):
-                config_files.append(str(file_path))
-            return config_files
+            return [str(p) for p in paths.iter_config_files()]
         except Exception as e:
             logger.error(f"Error getting available configs: {str(e)}")
             return []

@@ -11,14 +11,14 @@ import logging
 from datetime import datetime
 import os
 
-from api.models import (
+from exacqman.web.api.models import (
     ExtractRequest, CameraInfo, ConfigInfo,
     JobsSnapshot, FileInfo, ApiResponse,
 )
-from services.exacqman_service import ExacqManService
-from services.file_service import FileService
-from services.config_service import ConfigService
-from services.job_queue import JobQueue, BacklogFullError, job_log_path
+from exacqman.web.services.exacqman_service import ExacqManService
+from exacqman.web.services.file_service import FileService
+from exacqman.web.services.config_service import ConfigService
+from exacqman.web.services.job_queue import JobQueue, BacklogFullError, job_log_path
 
 logger = logging.getLogger(__name__)
 

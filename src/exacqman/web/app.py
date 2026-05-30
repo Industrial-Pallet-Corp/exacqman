@@ -10,25 +10,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import asyncio
+import importlib.resources
 import logging
 from datetime import datetime
 from pathlib import Path
 
-from api.routes import router, job_queue
+from exacqman import paths
+from exacqman.web.api.routes import router, job_queue
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Resolve project paths from this file's location so the server behaves the
-# same regardless of the working directory it is launched from. Exports live
-# at the project root (<root>/exports) so CLI users running from the repo root
-# find them alongside the tool; the value is shared with the CLI and JobQueue.
-# The frontend stays under exacqman-web/frontend.
-BACKEND_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BACKEND_DIR.parent.parent
-EXPORTS_DIR = PROJECT_ROOT / "exports"
-FRONTEND_DIR = BACKEND_DIR.parent / "frontend"
+# Exports are user data, resolved via exacqman.paths (the cwd's exports/ for a
+# foreground server, or EXACQMAN_EXPORTS_DIR for a managed service) so a
+# read-only installed package never writes into its own tree. The frontend is
+# bundled, read-only static content shipped inside the package; locate it via
+# importlib.resources so it resolves correctly once installed into a venv.
+EXPORTS_DIR = paths.exports_dir()
+FRONTEND_DIR = Path(importlib.resources.files("exacqman.web") / "frontend")
 
 # Create FastAPI app
 app = FastAPI(
@@ -118,7 +118,7 @@ async def root():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "app:app",
+        "exacqman.web.app:app",
         host="0.0.0.0",
         port=8887,
         reload=True,

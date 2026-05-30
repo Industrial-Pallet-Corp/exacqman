@@ -135,6 +135,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myenv/
+.verify-venv/
 
 # Spyder project settings
 .spyderproject
@@ -173,20 +175,8 @@ cython_debug/
 # .mp4 movie files
 *.mp4
 
-# ExacqMan CLI scratch dir (crop probe clips, etc.)
-.tmp/
-
 # Finished extracts delivered by the CLI and web service (project root)
 exports/
-
-# ExacqMan Web Application
-exacqman-web/uploads/
-exacqman-web/logs/
-exacqman-web/backend/__pycache__/
-exacqman-web/backend/*.pyc
-exacqman-web/backend/.env
-exacqman-web/backend/logs/
-exacqman-web/backend/temp/
 
 # Web application specific
 .DS_Store

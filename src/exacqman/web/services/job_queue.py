@@ -34,8 +34,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, List, Optional
 
-from api.models import ExtractRequest, Job, JobStatusEnum, JobsSnapshot
-from services.exacqman_service import ExtractFailure
+from exacqman import paths
+from exacqman.web.api.models import ExtractRequest, Job, JobStatusEnum, JobsSnapshot
+from exacqman.web.services.exacqman_service import ExtractFailure
 
 logger = logging.getLogger(__name__)
 
@@ -48,24 +49,21 @@ TERMINAL_TTL_SECONDS = 60
 """How long terminal jobs are retained in the registry. Generously longer
 than the client poll interval so no transition is missed in normal use."""
 
-JOB_LOG_DIR = (
-    Path(__file__).resolve().parent.parent.parent / "logs"
-)
-"""Directory where per-job log snippets are written on failure. Lives next
-to the backend so it survives across server restarts and is easy to inspect
-out-of-band. The directory is shared with any future general server logs;
-job-specific files use the ``{job_id}.log`` convention (UUID stems) so they
-remain unambiguous next to anything else that lands here. Currently kept
-indefinitely -- cleanup is a separate maintenance concern."""
+JOB_LOG_DIR = paths.log_dir()
+"""Directory where per-job log snippets are written on failure. Resolved via
+``exacqman.paths.log_dir()`` (Homebrew ``var/log`` or the XDG state dir) so an
+installed, read-only package never writes into its own tree. Shared with the
+server PID/log; job-specific files use the ``{job_id}.log`` convention (UUID
+stems) so they remain unambiguous. Currently kept indefinitely -- cleanup is a
+separate maintenance concern."""
 
-EXPORTS_DIR = (
-    Path(__file__).resolve().parent.parent.parent.parent / "exports"
-)
+EXPORTS_DIR = paths.exports_dir()
 """Directory where the CLI delivers finished extracts (and where the UI's
-file browser reads from). Lives at the project root (<root>/exports), the
-same location the CLI is told to write into via ``--output-dir`` in
-``services.exacqman_service``; we recompute it here so the prune step
-doesn't have to thread a reference through the JobQueue constructor."""
+file browser reads from). Resolved via ``exacqman.paths.exports_dir()`` (the
+cwd's ``exports/`` for a foreground server, or ``EXACQMAN_EXPORTS_DIR`` for a
+managed service) -- the same value handed to the CLI via ``--output-dir`` in
+``services.exacqman_service``; we recompute it here so the prune step doesn't
+have to thread a reference through the JobQueue constructor."""
 
 MAX_EXPORT_FILES = 25
 """Hard cap on the number of finished-extract .mp4 files retained in
@@ -86,7 +84,7 @@ until the count is back at the cap. The UI surfaces this as a
 # The verbose / technical detail still lives in the per-job log file
 # accessible via /api/jobs/{id}/log.
 
-_CAPTURED_LOGGER_NAMES = ("services", "api")
+_CAPTURED_LOGGER_NAMES = ("exacqman.web.services", "exacqman.web.api")
 """Logger namespaces whose records are folded into the per-job log capture.
 These cover everything the extract pipeline emits (CLI driver, job queue,
 route layer) without dragging in unrelated uvicorn / asyncio noise."""

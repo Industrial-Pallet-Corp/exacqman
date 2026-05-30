@@ -21,7 +21,8 @@ import tomllib
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from api.models import CameraInfo, ConfigInfo
+from exacqman import paths
+from exacqman.web.api.models import CameraInfo, ConfigInfo
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +43,25 @@ class ConfigService:
     """Service for managing ExacqMan configuration files."""
 
     def __init__(self):
-        self.working_directory = Path(__file__).parent.parent.parent.parent  # ExacqMan root
         self.timelapse_options = [1, 2, 5, 10, 15, 20, 25, 30, 40, 50]
 
     # ---- internal helpers ---------------------------------------------------
 
     def _resolve_path(self, config_file: str) -> Path:
+        """Resolve a config name/path to an absolute file location.
+
+        Absolute paths pass through. A bare name is matched against the
+        discovered ``*.config`` files (config dir, then cwd); if none match we
+        fall back to ``config_dir()/<name>`` so a not-yet-created file still
+        resolves to a sensible location for the not-found error.
+        """
         config_path = Path(config_file)
-        if not config_path.is_absolute():
-            config_path = self.working_directory / config_file
-        return config_path
+        if config_path.is_absolute():
+            return config_path
+        for candidate in paths.iter_config_files():
+            if candidate.name == config_file:
+                return candidate
+        return paths.config_dir() / config_file
 
     def _load(self, config_file: str) -> dict:
         """Read and parse a TOML config file.
@@ -177,9 +187,9 @@ class ConfigService:
             return None
 
     def get_available_config_files(self) -> List[str]:
-        """List ``*.config`` files in the ExacqMan working directory."""
+        """List ``*.config`` files from the config dir and the cwd (deduped)."""
         try:
-            config_files = [p.name for p in self.working_directory.glob("*.config")]
+            config_files = [p.name for p in paths.iter_config_files()]
             logger.info("Found %d configuration files", len(config_files))
             return config_files
         except Exception:
