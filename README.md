@@ -1,136 +1,80 @@
 # ExacqMan
 
-A Python-based tool for extracting video footage from ExacqVision servers using the ExacqVision Web API. It supports creating timelapse videos, compressing footage, and overlaying timestamps, with flexible configuration via command-line arguments and config files.
+A Python tool for extracting footage from ExacqVision servers via the ExacqVision Web API. It creates timelapses, compresses footage, and overlays timestamps, driven by command-line arguments and a TOML config file.
 
-A browser-based frontend is available in [`exacqman-web/`](exacqman-web/README.md), which wraps the same CLI behind a small FastAPI service. The web README also documents the **CLI ↔ backend integration contract** (JSON event stream, stage taxonomy, error types, exit codes) for anyone building other programmatic callers on top of `exacqman.py`.
+ExacqMan ships as a single installable package exposing two console commands:
+
+- **`exacqman`** — the CLI (extract / compress / timelapse / crop / init).
+- **`exacqman-web`** — a small FastAPI web UI that wraps the same CLI (start / stop / status). See [`src/exacqman/web/README.md`](src/exacqman/web/README.md) for the UI and the **CLI ↔ backend integration contract** (JSON event stream, stage taxonomy, error types, exit codes) used by programmatic callers.
+
+The web UI is bundled but **opt-in at runtime** — installing the package never starts a server.
 
 For API testing, [explore the Postman collection](https://weareipc.postman.co/workspace/Industrial-Pallet-Corp~f0dc5379-c365-405e-8a29-ee8050839c42/collection/38801065-56761369-c40d-4cb1-9ab1-3f0a7efb59c9?action=share&creator=38801065&active-environment=7096363-3d41cab2-1adc-47b2-8041-ef8c9b87eb00).
 
-## Requirements
+## Installation
 
-- Python 3.8+
-- `requests`
-- `tqdm`
-- `moviepy`
-- `opencv-python` (cv2)
-- `python-dateutil`
-- `tzdata`
-
-## Setup
-
-1. Clone this repository or download `exacqman.py`, `exacqvision.py`, and `default.config`.
-2. Copy `default.config` and rename it (e.g., `mydefault.config`).
-3. Edit the config file:
-   - **[Auth]**: Set `user` and `password` for ExacqVision API access.
-   - **[Network]**: List server names and their IP addresses.
-   - **[Cameras]**: Map camera aliases to their IDs.
-   - **[Settings]**: Configure `timezone`, `timelapse_multiplier` (positive integer), `compression_level` (`low`, `medium`, or `high`), `crop_dimensions` (leave blank for interactive cropping), and `font_weight` (positive integer for timestamp thickness).
-4. Save the config file.
-
-## Usage
-
-Run `python exacqman.py --help` for detailed command-line options. The script supports four modes:
-
-### Commands
-
-- **extract**: Retrieves video from an ExacqVision server, applies timelapse, adds timestamps, and compresses the output.
-- **compress**: Compresses an existing video file to a specified quality.
-- **timelapse**: Creates a timelapse video from an existing file, with optional cropping and timestamping.
-- **crop**: Grabs a recent frame from a single camera and opens the interactive crop selector, printing crop dimensions to paste into your config. Captures crop dimensions per camera without running a full extraction.
-
-### Command-Line Syntax
+### Homebrew (recommended)
 
 ```bash
-python exacqman.py [-h | --help] <command> [<args>]
+brew install <your-tap>/exacqman
 ```
 
-#### Extract Mode
+This installs both the `exacqman` and `exacqman-web` commands and a bundled `ffmpeg` (via `imageio-ffmpeg`). Config and credentials live in `$(brew --prefix)/etc/exacqman`; see [Configuration](#configuration). To run the web UI as a managed background service, see [Running the web UI as a service](#running-the-web-ui-as-a-service).
+
+> Packaging the tap formula? See [Packaging (Homebrew tap)](#packaging-homebrew-tap) for ready-to-paste `service`, `caveats`, and seeding blocks.
+
+### From source (development)
+
+Requires **Python 3.11+** (the CLI uses the stdlib `tomllib`). Dependencies are declared in `pyproject.toml` and installed automatically:
 
 ```bash
-python exacqman.py extract camera_alias [date] [start] [end] [config_file] [--server SERVER] [-o OUTPUT_NAME] [--quality {low,medium,high}] [--multiplier MULTIPLIER] [-c {true,false}]
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e .            # editable install for development
+exacqman --help
 ```
 
-- `camera_alias`: Camera name (e.g., "front_door"). Required.
-- `date`: Date in MM/DD format (e.g., "3/11"). Use the start date if footage spans midnight.
-- `start`: Start time (e.g., "6pm", "18:30").
-- `end`: End time (e.g., "8pm", "20:00").
-- `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
-- `--config`: Flag-form alternative to the positional `config_file`. Handy for programmatic callers that prefer named flags over positional ordering.
-- `--start-iso-datetime` / `--end-iso-datetime`: ISO 8601 datetimes (e.g. `2026-05-27T09:30:00`, or with offset `2026-05-27T09:30:00-04:00`). When provided together, they replace the positional `date`/`start`/`end` form -- no year inference, no day rollover heuristic, full second-level precision. Intended for programmatic callers (the web UI uses these); humans should keep using the positional form. Cannot be combined with the positional `date`/`start`/`end` arguments on the same command.
-- `--server`: Server name (e.g., "ch" for Clark Hill).
-- `-o, --output_name`: Output file path. When omitted, the CLI builds a canonical default of the form `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` so filenames are deterministic and sort by date.
-- `--output-dir`: Directory to deliver the final extracted video into. When set, the pipeline writes its raw download, timelapsed, and compressed files into this directory; on successful completion, the intermediates are removed and the compressed file is renamed to bare `{name}.mp4` so the directory ends up holding exactly one user-facing deliverable. When omitted, behavior is unchanged: all three files land in the current working directory with their stem-based names (including the codec suffix on the compressed file). Intended for programmatic callers; humans typically `cd` into their target directory and omit this.
-- `--quality`: Compression quality (`low`, `medium`, `high`).
-- `--multiplier`: Timelapse speed factor (positive integer).
-- `-c, --crop {true,false}`: Whether to crop the video. When omitted, defers to `[settings].default_crop` in the config. When cropping, uses per-camera `crop_dimensions`, falling back to `[settings].default_crop_dimensions`; prompts interactively if neither is set.
-
-#### Compress Mode
+## Quick start
 
 ```bash
-python exacqman.py compress video_filename quality [-o OUTPUT_NAME]
+exacqman init                       # scaffold config + credentials into the standard config dir
+# edit the printed default.config (servers, cameras) and default.credentials (username/password)
+exacqman extract dock-10 5/30 9am 9:05am --server ch
 ```
 
-- `video_filename`: Input video file path.
-- `quality`: Compression quality (`low`, `medium`, `high`).
-- `-o, --output_name`: Output file path.
+`exacqman init` copies the bundled templates into the [config directory](#configuration) and prints the exact paths plus next steps. The credentials file is written with `0600` permissions.
 
-#### Timelapse Mode
+## Configuration
 
-```bash
-python exacqman.py timelapse video_filename multiplier [-o OUTPUT_NAME] [-c {true,false}]
-```
+Configuration is split into two TOML files:
 
-- `video_filename`: Input video file path.
-- `multiplier`: Timelapse speed factor (positive integer).
-- `-o, --output_name`: Output file path.
-- `-c, --crop {true,false}`: Whether to crop the video.
+- a **config** file (`*.config`) — servers, cameras, and `[settings]` defaults; and
+- a **credentials** file (`*.credentials`) — the `[auth]` username/password.
 
-#### Crop Mode
+### Where they live
 
-```bash
-python exacqman.py crop --camera CAMERA [config_file] [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
-```
+ExacqMan looks for config files in a standard, cwd-independent location so the tool works from any directory:
 
-Grabs a short clip from approximately the current moment, opens the interactive ROI selector on its first frame, and prints the selected crop dimensions in TOML-paste-ready form (both a `crop_dimensions` line for `[<server>.<alias>]` and a `default_crop_dimensions` line for `[settings]`). It performs no timelapse, compression, or file output -- it is a quick way to capture crop dimensions for each camera.
+| Precedence | Config source |
+| --- | --- |
+| 1 | `--config <file>` (and `--credentials <file>`) on the command line |
+| 2 | `$EXACQMAN_CONFIG_DIR/*.config` |
+| 3 | `$(brew --prefix)/etc/exacqman/*.config` (Homebrew) or `~/.config/exacqman/*.config` (XDG) |
+| 4 | `*.config` in the current working directory |
 
-- `--camera`: Camera name, required (must match a `[<server>.<alias>]` entry).
-- `config_file`: Path to configuration file. Can alternatively be passed via `--config`.
-- `--config`: Flag-form alternative to the positional `config_file`.
-- `--credentials`: Path to TOML credentials file. Overrides `settings.credentials_file` in the config.
-- `--server`: Server name (must match a top-level `[<server>]` table).
-- `--lookback-minutes`: How far back from now to request the probe clip, in minutes (default: 15). Increase this if the camera is motion-triggered and has no recent footage.
+When no `--config` is given, ExacqMan auto-discovers a `*.config` from the locations above (preferring one named `default.config`). The Homebrew `etc/exacqman` location is the documented "where does Homebrew keep config for this package" spot and survives upgrades.
 
-Note: like interactive cropping during `extract`/`timelapse`, this opens a GUI window and therefore requires a display.
+**Credentials** resolve relative to the config file's own directory (or `--credentials <path>` / `[settings].credentials_file`). The credentials file beside the config is treated as **shared service auth** by convention; for personal or ad-hoc auth, point `--credentials` at a private file anywhere.
 
-### Example Commands
+### Config file format
 
-- Extract video from a camera for March 11, 6 PM to 8 PM, with config and cropping:
-  ```bash
-  python exacqman.py extract front_door 3/11 6pm 8pm mydefault.config --server ch --output_name output.mp4 --quality medium --multiplier 10 --crop true
-  ```
-- Compress a video to medium quality:
-  ```bash
-  python exacqman.py compress input.mp4 medium --output_name compressed.mp4
-  ```
-- Create a 5x timelapse video:
-  ```bash
-  python exacqman.py timelapse input.mp4 5 --output_name timelapse.mp4 --crop true
-  ```
-- Capture crop dimensions for a camera (opens the selector on a recent frame):
-  ```bash
-  python exacqman.py crop --camera front_door mydefault.config --server ch
-  ```
-
-## Configuration File
-
-The config file (`default.config` template) is a TOML file holding program defaults; per-run values (server, camera, time range, output name) are supplied as CLI arguments. Authentication lives in a separate credentials file (see `sample.credentials`). `[settings]` is the reserved table for defaults. Every other top-level table is a server (e.g. `[ch]`, `[gpa]`) with a `url`. Cameras are sub-tables of their server, written as `[<server>.<alias>]`, so the same alias can be reused across servers without ID collisions.
+`[settings]` is the reserved defaults table. Every other top-level table is a **server** (e.g. `[ch]`, `[gpa]`) with a `url`. Cameras are sub-tables of their server, `[<server>.<alias>]`, so the same alias can be reused across servers without ID collisions.
 
 ```toml
 [settings]
 credentials_file = "default.credentials"
 timezone = "America/Indiana/Indianapolis"
 timelapse_multiplier = 50
-compression_level = "high"
+compression_level = "high"          # low | medium | high
 font_weight = 4
 default_crop = true
 default_crop_dimensions = [[0, 0], [1920, 1080]]
@@ -138,7 +82,7 @@ default_crop_dimensions = [[0, 0], [1920, 1080]]
 [ch]
 url = "http://192.168.1.100"
 
-[ny]
+[gpa]
 url = "http://192.168.2.100"
 
 [ch.front_door]
@@ -149,43 +93,166 @@ crop_dimensions = [[624, 14], [666, 766]]
 id = 2
 ```
 
-- Server names must not be `settings` (that table is reserved), and must not contain `.`.
-- Each server table needs a non-empty `url`; each camera sub-table needs a positive-integer `id`.
-- `default_crop` (boolean) sets whether extracts/timelapses crop by default. Override per-run with `--crop true` / `--crop false`.
-- Omit a camera's `crop_dimensions` to fall back to `[settings].default_crop_dimensions`; omit both to select interactively during runtime (the `crop` subcommand outputs a line you can paste back in).
-- `crop_dimensions` are `[[x, y], [width, height]]` arrays of integers.
-- Ensure `timelapse_multiplier` and `font_weight` are positive integers.
-- `compression_level` must be `low`, `medium`, or `high`.
+- Server names must not be `settings` (reserved) and must not contain `.`.
+- Each server table needs a non-empty `url`; each camera needs a positive-integer `id`.
+- `default_crop` (boolean) sets whether extracts/timelapses crop by default. Override per-run with `-c true` / `-c false`.
+- Omit a camera's `crop_dimensions` to fall back to `[settings].default_crop_dimensions`; omit both to pick interactively (use the `crop` command to capture them).
+- `crop_dimensions` are `[[x, y], [width, height]]` integer arrays.
+- `timelapse_multiplier` and `font_weight` must be positive integers.
 
-## Testing
+## Output (exports)
 
-1. Verify the configuration file is properly set up.
-2. Test with sample commands in each mode.
-3. Date format: `MM/DD` or `MM/DD/YYYY`.
-4. Time format: `HH:MM:SSAM|PM` (e.g., "6:00:00PM"), or simplified (e.g., "6pm").
-5. Check output videos for correct timelapse speed, compression quality, cropping, and timestamp accuracy.
+Finished videos are written to **`./exports`** in the current working directory by default. Override per-run with `--output-dir <dir>`, or globally with the `EXACQMAN_EXPORTS_DIR` environment variable (used by the background service — see below). Output files are always `.mp4`.
 
-## Exacqvision API Interaction
+## CLI usage
 
-The `exacqvision.py` module handles API communication:
+Run `exacqman --help` (or `exacqman <command> --help`) for full options. Five commands:
 
-- **Login**: Authenticates and retrieves a session ID.
-- **Logout**: Ends the session.
-- **List Cameras**: Retrieves available cameras.
-- **Create Search**: Queries video clip timestamps.
-- **Export Request**: Initiates video export.
-- **Export Status**: Monitors export request progress.
-- **Export Download**: Downloads the video.
-- **Export Delete**: Cleans up export requests.
-- **Get Video**: Combines export steps to retrieve a video.
-- **Get Timestamps**: Extracts timestamps for video frames.
+- **extract** — retrieve footage, timelapse, timestamp, and compress.
+- **compress** — compress an existing video to a target quality.
+- **timelapse** — timelapse an existing video, with optional cropping/timestamping.
+- **crop** — grab a recent frame from one camera and open the interactive crop selector, printing crop dimensions for your config (no extraction).
+- **init** — scaffold config + credentials into the standard config directory.
 
-See docstrings in `exacqvision.py` for detailed usage.
+### extract
+
+```bash
+exacqman extract camera_alias [date] [start] [end] [config_file] \
+  [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] \
+  [-o OUTPUT_NAME] [--output-dir DIR] [--quality {low,medium,high}] \
+  [--multiplier N] [-c {true,false}] [--caption TEXT]
+```
+
+- `camera_alias` (required), `date` (`M/D` or `M/D/YYYY`), `start`/`end` (e.g. `6pm`, `18:30`).
+- `config_file` / `--config`: config to use; omit to auto-discover (see [Configuration](#configuration)).
+- `--start-iso-datetime` / `--end-iso-datetime`: ISO 8601 datetimes (e.g. `2026-05-27T09:30:00-04:00`). When given together they replace the positional `date`/`start`/`end` form with full, unambiguous precision — intended for programmatic callers (the web UI uses these).
+- `--server`: server name (must match a top-level `[<server>]` table).
+- `-o, --output_name`: output filename. When omitted, a canonical `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` name is built.
+- `--output-dir`: deliver a single clean `{name}.mp4` into this directory (intermediates removed). Defaults to the current directory.
+- `--quality`, `--multiplier`, `-c/--crop {true,false}`, `--caption`.
+
+### compress
+
+```bash
+exacqman compress video_filename {low,medium,high} [-o OUTPUT_NAME]
+```
+
+### timelapse
+
+```bash
+exacqman timelapse video_filename multiplier [-o OUTPUT_NAME] [-c {true,false}] [--caption TEXT]
+```
+
+### crop
+
+```bash
+exacqman crop --camera CAMERA [config_file] [--config CONFIG] \
+  [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
+```
+
+Grabs a short clip from ~now, opens the interactive ROI selector on its first frame, and prints `crop_dimensions` / `default_crop_dimensions` lines ready to paste into your config (it can also offer to write them back automatically). Opens a GUI window, so it requires a display.
+
+### init
+
+```bash
+exacqman init [--force]
+```
+
+Copies the bundled `default.config` and `default.credentials` templates into the config directory (`--force` overwrites existing files).
+
+### Examples
+
+```bash
+exacqman init
+exacqman extract front_door 3/11 6pm 8pm --server ch --multiplier 10 -c true
+exacqman compress input.mp4 medium -o compressed.mp4
+exacqman timelapse input.mp4 5 -c true
+exacqman crop --camera front_door --server ch
+```
+
+### Listing cameras
+
+The `exacqvision` module doubles as a read-only inspection utility:
+
+```bash
+python -m exacqman.exacqvision --config <file> --credentials <file> [--server ch] --list-cameras
+```
+
+## Web UI
+
+```bash
+exacqman-web start            # foreground on http://localhost:8887 (Ctrl-C to stop)
+exacqman-web start --reload   # development auto-reload
+exacqman-web status
+exacqman-web stop
+```
+
+`start` runs a single foreground uvicorn process. Default port is **8887** (`--port/-p`); bind interface with `--host`. `stop`/`status` locate the server via a PID file (in the log directory) or by listener discovery on the port. See [`src/exacqman/web/README.md`](src/exacqman/web/README.md) for endpoints and the integration contract.
+
+### Running the web UI as a service
+
+There is intentionally **no `--background` flag**. Unattended operation (auto-restart, start-at-login) is delegated to the OS service manager. On Homebrew:
+
+```bash
+brew services start exacqman      # supervised via launchd (macOS) / systemd (Linux)
+brew services stop exacqman
+```
+
+The service runs the same foreground `exacqman-web start`, reads config from `etc/exacqman`, writes logs to `var/log`, and exports to a stable directory (set via `EXACQMAN_EXPORTS_DIR`). It is **never started automatically** by `brew install`.
+
+## Runtime locations summary
+
+| What | Homebrew install | From source / XDG | Env override |
+| --- | --- | --- | --- |
+| Config + credentials | `$(brew --prefix)/etc/exacqman` | `~/.config/exacqman` | `EXACQMAN_CONFIG_DIR` |
+| Exports | `./exports` (cwd) | `./exports` (cwd) | `EXACQMAN_EXPORTS_DIR` |
+| Logs + PID file | `$(brew --prefix)/var/log` | `~/.local/state/exacqman` | `EXACQMAN_LOG_DIR` |
+
+The installed package itself is read-only — nothing is ever written inside it. All locations resolve through `exacqman.paths`.
+
+## Packaging (Homebrew tap)
+
+ExacqMan is **brew-only** (no PyPI publish target; `pip` is used internally by the formula's virtualenv to build the source tarball). The package is a standard `src/`-layout, PEP 621 `pyproject.toml` project built with `hatchling`, so `brew create --python` + `brew update-python-resources` work as-is. Hints for the tap's `Formula/exacqman.rb`:
+
+**Build:** a `Language::Python::Virtualenv` formula. Console scripts `exacqman` and `exacqman-web` are declared in `[project.scripts]`. `depends_on "ffmpeg"` is optional — the wheel bundles ffmpeg via `imageio-ffmpeg`.
+
+**Seed the standard dirs** (Homebrew preserves `etc` across upgrades; never ship a real credentials file in the bottle — `exacqman init` writes one `0600` on first run):
+
+```ruby
+# Template ships inside the package data dir of the unpacked source tarball.
+pkgetc.install "src/exacqman/data/default.config" => "default.config.example" unless (pkgetc/"default.config").exist?
+(var/"exacqman/exports").mkpath
+(var/"log").mkpath
+```
+
+**Opt-in background service** (not started by `brew install`; only by `brew services start exacqman`):
+
+```ruby
+service do
+  run [opt_bin/"exacqman-web", "start", "--host", "127.0.0.1", "--port", "8887"]
+  keep_alive true
+  working_dir var/"exacqman"                       # stable cwd
+  log_path var/"log/exacqman-web.log"
+  error_log_path var/"log/exacqman-web.log"
+  environment_variables EXACQMAN_EXPORTS_DIR: var/"exacqman/exports"
+end
+```
+
+`exacqman-web start` is a clean foreground process (no self-daemonizing), exactly what `brew services` expects. The service reads config from `#{etc}/exacqman` automatically (no `--config` needed) because `exacqman.paths` detects the Homebrew prefix from the install location.
+
+**Caveats** (make the opt-ins discoverable):
+
+```ruby
+def caveats
+  <<~EOS
+    Config and credentials live in #{etc}/exacqman (run `exacqman init` to seed them).
+    To run the web UI as a background service:  brew services start exacqman
+  EOS
+end
+```
 
 ## Notes
 
-- The script adds timestamps to extracted videos using server-provided clip data.
-- Cropping can be set in the config or selected interactively during runtime.
-- Output files are always `.mp4`.
-- Compression uses `libx264` codec with adjustable bitrate and resolution based on quality settings.
+- Timestamps are overlaid using server-provided clip data; cropping is configurable or interactive.
+- Compression uses the `libx264` codec with bitrate/resolution tuned by quality level.
 - Ensure network access to the ExacqVision server and valid credentials.

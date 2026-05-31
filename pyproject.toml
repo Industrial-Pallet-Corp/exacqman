@@ -33,6 +33,7 @@ dependencies = [
     "requests>=2.31",           # ExacqVision HTTP API
     "python-dateutil>=2.8",     # flexible datetime parsing
     "tzdata>=2024.1",           # ZoneInfo data on platforms without a system tz db
+    "tqdm>=4.65",               # human-mode progress bars (progress.py)
     # --- web UI ---
     "fastapi>=0.110",
     "uvicorn>=0.23",
