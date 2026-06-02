@@ -55,7 +55,7 @@ class Settings:
     crop: bool = False                  # Does the video need cropped? Crop dimensions only matter if this is True.
     default_crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Fallback crop applied when the selected camera has no per-camera override
     crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Effective crop for this run: per-camera override if set, else default
-    font_weight: int = 2                # Font thickness
+    font_weight: int = 3                # Overlay stroke weight on a 1-5 scale (1 = thinnest, 5 = heaviest)
     caption: str = None                 # Optional caption rendered below the timestamp
     caption_limit = 30                  # Max number of characters for caption
 
@@ -177,10 +177,10 @@ class Settings:
             )),
             default_crop_dimensions=default_crop,
             crop_dimensions=effective_crop,
-            font_weight=set_value(
+            font_weight=_normalize_font_weight(set_value(
                 config_value=settings_table.get('font_weight'),
                 cls_value=cls.font_weight,
-            ),
+            )),
             caption=set_value(
                 arg_value='caption',
                 cls_value=cls.caption,
@@ -247,6 +247,21 @@ class Settings:
 LANDSCAPE_MAX_TEXT_WIDTH_FRACTION = 1 / 3
 DEFAULT_MAX_TEXT_WIDTH_FRACTION = 0.8
 BOTTOM_MARGIN_FRACTION = 0.10
+
+# Overlay stroke weight on a 1-5 scale (1 = thinnest, 5 = heaviest), mapped to
+# a pixels-per-unit-font-scale factor. Because the stroke is multiplied by the
+# per-line font_scale at render time, it stays proportional to glyph size, so
+# the perceived weight is constant regardless of the export's absolute
+# resolution or aspect ratio. Factors are tunable; 3 is the calibrated default.
+FONT_WEIGHT_FACTORS = {1: 1.0, 2: 1.75, 3: 2.5, 4: 3.25, 5: 4.0}
+DEFAULT_FONT_WEIGHT = 3
+
+
+def _normalize_font_weight(value) -> int:
+    """Coerce a font_weight setting to a 1-5 level, defaulting when invalid."""
+    if isinstance(value, int) and not isinstance(value, bool) and value in FONT_WEIGHT_FACTORS:
+        return value
+    return DEFAULT_FONT_WEIGHT
 
 
 def fit_to_screen(frame, window_name, screen_width, screen_height):
@@ -476,6 +491,13 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     """
     reporter = get_reporter()
 
+    # Stroke thickness is derived from the per-line font_scale so the rendered
+    # weight stays proportional to glyph size at any resolution/aspect ratio.
+    weight_factor = FONT_WEIGHT_FACTORS[_normalize_font_weight(settings.font_weight)]
+
+    def line_thickness(line_font_scale: float) -> int:
+        return max(1, round(line_font_scale * weight_factor))
+
     def calculate_font_scale(video_width: int, video_height: int, caption: Optional[str]) -> float:
         # Static timestamp string: the format is fixed-width so its rendered
         # width never changes frame-to-frame.
@@ -496,10 +518,10 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         # output, the ratio governs visual hierarchy), so its effective
         # width at the chosen scale is `caption_w_at_1 * scale * 0.8`.
         # Comparing widths AT SCALE=1 lets us solve for `scale` in one step.
-        ts_w_at_1 = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0][0]
+        ts_w_at_1 = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, 1, line_thickness(1.0))[0][0]
         widest_at_1 = ts_w_at_1
         if caption:
-            caption_w_at_1 = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0][0]
+            caption_w_at_1 = cv2.getTextSize(caption, cv2.FONT_HERSHEY_SIMPLEX, 1, line_thickness(1.0))[0][0]
             widest_at_1 = max(widest_at_1, caption_w_at_1 * 0.8)
 
         return max_text_width / widest_at_1
@@ -512,7 +534,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         font_scale: float,
         caption_y_offset: Optional[int] = None,
     ) -> tuple[int, int]:
-        text_size = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, font_scale, settings.font_weight)[0]
+        text_size = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, font_scale, line_thickness(font_scale))[0]
         text_width, _ = text_size
         x_position = (video_width - text_width) // 2  # Center horizontally
 
@@ -585,12 +607,14 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         number_of_timestamps = len(timestamps)
 
     font_scale = calculate_font_scale(crop_width, crop_height, settings.caption)
+    ts_thickness = line_thickness(font_scale)
 
     # Pre-compute caption layout once. The caption text and font scale don't
     # change frame-to-frame, so measuring inside the render loop would be
     # wasteful. We anchor the caption directly below the timestamp using a
     # natural single-line leading (~25% of the timestamp's text height).
     caption_font_scale = font_scale * 0.8 if settings.caption else None
+    caption_thickness = line_thickness(caption_font_scale) if settings.caption else None
     caption_x = None
     caption_y_offset = None
     if settings.caption:
@@ -598,7 +622,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
             settings.caption,
             cv2.FONT_HERSHEY_SIMPLEX,
             caption_font_scale,
-            settings.font_weight,
+            caption_thickness,
         )
         # Use a representative timestamp string to derive the line gap. Real
         # per-frame timestamps differ only in their digit values so their
@@ -608,7 +632,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
             sample_ts,
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
-            settings.font_weight,
+            ts_thickness,
         )
         line_gap = max(2, int(sample_ts_h * 0.25))
         caption_x = (crop_width - caption_w) // 2
@@ -652,7 +676,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
                 crop_height, crop_width, timestamp_string, font_scale,
                 caption_y_offset=caption_y_offset,
             )
-            cv2.putText(finished_frame, timestamp_string, (x_pos, y_pos), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), settings.font_weight, cv2.LINE_AA)
+            cv2.putText(finished_frame, timestamp_string, (x_pos, y_pos), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), ts_thickness, cv2.LINE_AA)
             if settings.caption:
                 cv2.putText(
                     finished_frame,
@@ -661,7 +685,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
                     cv2.FONT_HERSHEY_SIMPLEX,
                     caption_font_scale,
                     (255, 255, 255),
-                    settings.font_weight,
+                    caption_thickness,
                     cv2.LINE_AA,
                 )
 
