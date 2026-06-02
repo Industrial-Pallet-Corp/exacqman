@@ -295,9 +295,9 @@ def validate_config(config: dict) -> bool:
 
     font_weight = settings_table.get('font_weight')
     if font_weight is None:
-        warnings.append('settings.font_weight is missing. Program will default to 2')
-    elif not isinstance(font_weight, int) or isinstance(font_weight, bool) or font_weight <= 0:
-        fatal_errors.append('settings.font_weight must be a positive integer')
+        warnings.append('settings.font_weight is missing. Program will default to 3')
+    elif not isinstance(font_weight, int) or isinstance(font_weight, bool) or not 1 <= font_weight <= 5:
+        fatal_errors.append('settings.font_weight must be an integer from 1 (thinnest) to 5 (heaviest)')
 
     default_crop = settings_table.get('default_crop')
     if default_crop is not None and not isinstance(default_crop, bool):
