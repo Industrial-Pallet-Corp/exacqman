@@ -14,6 +14,11 @@ class AppState {
             servers: {},
             currentConfig: null,
 
+            // Per-server reachability for the current config, refreshed on
+            // config change and on demand. Shape: {servers: {name: {reachable,
+            // detail}}, summary: 'all'|'some'|'none'|null}.
+            connectivity: { servers: {}, summary: null },
+
             // Job queue (server-authoritative, refreshed by the queue poller)
             //
             //   queue.running:  the single Job currently being processed (or null)
@@ -356,6 +361,7 @@ class AppState {
             cameras: [],
             servers: {},
             currentConfig: null,
+            connectivity: { servers: {}, summary: null },
             queue: { running: null, waiting: [] },
             queueFull: false,
             sessionJobs: new Map(),

@@ -7,12 +7,13 @@ Defines REST API endpoints for video processing operations.
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from typing import List, Optional
+import asyncio
 import logging
 from datetime import datetime
 import os
 
 from exacqman.web.api.models import (
-    ExtractRequest, CameraInfo, ConfigInfo,
+    ExtractRequest, CameraInfo, ConfigInfo, ConnectivityInfo,
     JobsSnapshot, FileInfo, ApiResponse,
 )
 from exacqman.web.services.exacqman_service import ExacqManService
@@ -210,6 +211,32 @@ async def get_config_info(config_file: str) -> ConfigInfo:
     except Exception as e:
         logger.error(f"Error getting config info: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get configuration: {str(e)}")
+
+
+@router.get("/connectivity/{config_file}", response_model=ConnectivityInfo)
+async def get_connectivity(config_file: str) -> ConnectivityInfo:
+    """
+    Probe each server in the config for network reachability.
+
+    Unauthenticated, short-timeout reachability check shared with the CLI
+    `check` command. Probing is blocking I/O, so it runs in a worker thread
+    to avoid stalling the event loop.
+
+    Args:
+        config_file: Path to the configuration file
+
+    Returns:
+        ConnectivityInfo with per-server reachability and an overall summary
+    """
+    try:
+        return await asyncio.to_thread(
+            config_service.get_server_connectivity, config_file
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Configuration file not found: {config_file}")
+    except Exception as e:
+        logger.error(f"Error checking connectivity: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to check connectivity: {str(e)}")
 
 
 @router.get("/cameras/{config_file}", response_model=List[CameraInfo])

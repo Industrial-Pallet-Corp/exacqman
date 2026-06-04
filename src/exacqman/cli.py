@@ -4,7 +4,7 @@ from datetime import timedelta, datetime
 from dateutil.relativedelta import relativedelta
 from dateutil.parser import parse as duparse
 from zoneinfo import ZoneInfo
-from exacqman.exacqvision import Exacqvision, ExacqvisionError
+from exacqman.exacqvision import Exacqvision, ExacqvisionError, probe_server, probe_servers
 from requests.exceptions import RequestException
 from exacqman.exacqman_naming import default_output_stem
 from exacqman.exacqman_config import (
@@ -959,6 +959,24 @@ def parse_arguments():
         help='Overwrite existing files in the config directory.',
     )
 
+    # Check subcommand: probe each server in the config for network
+    # reachability (unauthenticated; no credentials required) and report
+    # per-server status. Shares the probe with the web service so both
+    # surfaces behave identically.
+    check_parser = subparsers.add_parser(
+        'check',
+        help='Test network reachability of the Exacqvision servers in the config.',
+    )
+    check_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
+    check_parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        dest='config_flag',
+        help='Filepath of local TOML config file. Flag-form alternative to the positional config_file.',
+    )
+    check_parser.add_argument('--server', type=str, help='Check only this server (must match a top-level [<server>] table); default checks all.')
+
     return arg_parser.parse_args()
 
 
@@ -1342,12 +1360,16 @@ def main():
     auth = None
     if config_file:
         config = import_config(config_file)
-        credentials_path = resolve_credentials_path(
-            config_file,
-            config,
-            getattr(args, 'credentials', None),
-        )
-        auth = import_credentials(credentials_path)
+        # `check` only probes network reachability, so it deliberately skips
+        # credential loading -- a connectivity test must work even when no
+        # (or invalid) credentials are present.
+        if args.command != 'check':
+            credentials_path = resolve_credentials_path(
+                config_file,
+                config,
+                getattr(args, 'credentials', None),
+            )
+            auth = import_credentials(credentials_path)
 
     settings = (
         Settings.from_args_and_config(args, config, auth)
@@ -1512,6 +1534,18 @@ def main():
                 extract_output_dir = Path(settings.output_dir).resolve()
                 extract_output_dir.mkdir(parents=True, exist_ok=True)
 
+            # Fast pre-flight: confirm the target server is reachable on the
+            # network before any login/export work, so an unreachable host
+            # fails immediately with a uniform message instead of waiting on
+            # the (now timeout-bounded) login round-trip.
+            preflight = probe_server(settings.server_ip)
+            if not preflight["reachable"]:
+                reporter.error(
+                    "ExacqvisionError",
+                    f"Server '{settings.server}' ({settings.server_ip}) is unreachable: {preflight['detail']}",
+                )
+                exit(1)
+
             # Instantiate api class and retrieve video. The constructor logs
             # in, so keep it inside the try where connection/auth failures are
             # reported cleanly instead of surfacing as a raw traceback.
@@ -1642,6 +1676,16 @@ def main():
             end = datetime.now()
             start = end - timedelta(minutes=lookback)
 
+            # Fast pre-flight reachability check (same as extract): fail
+            # immediately with a uniform message if the server is down.
+            preflight = probe_server(settings.server_ip)
+            if not preflight["reachable"]:
+                reporter.error(
+                    "ExacqvisionError",
+                    f"Server '{settings.server}' ({settings.server_ip}) is unreachable: {preflight['detail']}",
+                )
+                exit(1)
+
             reporter.stage(
                 "crop_probe",
                 f"Searching the last {lookback} min for footage from {settings.camera_alias}",
@@ -1761,6 +1805,56 @@ def main():
                         toml_coords,
                     )
                     (reporter.info if ok else reporter.warning)(message)
+
+        elif args.command == 'check':
+            if not config:
+                reporter.error(
+                    "ConfigError",
+                    "check requires a config file. Provide it positionally or with --config.",
+                )
+                exit(1)
+            servers = dict(settings.servers or {})
+            target = getattr(args, 'server', None)
+            if target:
+                if target not in servers:
+                    reporter.error(
+                        "ConfigError",
+                        f'Server "{target}" is not defined as a top-level [<server>] table in the config.',
+                    )
+                    exit(1)
+                servers = {target: servers[target]}
+            if not servers:
+                reporter.error("ConfigError", "No servers defined in the config to check.")
+                exit(1)
+
+            reporter.stage("checking", "Testing server connectivity", total=len(servers))
+            results = probe_servers(servers)
+            unreachable = []
+            for name in sorted(results):
+                result = results[name]
+                url = servers[name]
+                if result["reachable"]:
+                    reporter.info(
+                        f"{name} ({url}): reachable",
+                        server=name, url=url, reachable=True,
+                    )
+                else:
+                    unreachable.append(name)
+                    reporter.warning(
+                        f"{name} ({url}): UNREACHABLE - {result['detail']}",
+                        server=name, url=url, reachable=False, detail=result["detail"],
+                    )
+
+            reachable_count = len(results) - len(unreachable)
+            summary = f"{reachable_count}/{len(results)} server(s) reachable"
+            if unreachable:
+                reporter.warning(
+                    f"{summary}; unreachable: {', '.join(sorted(unreachable))}",
+                    summary=True, reachable_count=reachable_count, total=len(results),
+                )
+            else:
+                reporter.info(summary, summary=True, reachable_count=reachable_count, total=len(results))
+            sys.exit(1 if unreachable else 0)
 
         elif args.command == 'compress':
             final_path = compress_video(settings.input_filename, settings.output_filename)
