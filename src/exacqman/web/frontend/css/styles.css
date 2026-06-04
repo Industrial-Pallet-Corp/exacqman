@@ -227,6 +227,13 @@ label {
     display: block;
 }
 
+/* `display: block` above otherwise overrides the `hidden` attribute on
+   statically-placed .field-error elements (e.g. #filename-error), leaving an
+   empty red slot. Honor `hidden` so it only shows when a message is set. */
+.field-error[hidden] {
+    display: none;
+}
+
 /* Caption input with inline character counter */
 .caption-row {
     display: flex;

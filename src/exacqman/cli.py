@@ -1111,27 +1111,127 @@ def _embed_extract_metadata(file_path: Path, metadata: Dict[str, Any]) -> None:
             pass
 
 
+def _resolve_extract_output(
+    output_name: Optional[str],
+    output_dir_flag: Optional[str],
+    default_stem: str,
+) -> "tuple[Path, str, str]":
+    """Resolve the delivery directory and clean stem for an extract run.
+
+    Returns ``(target_dir, stem, dir_source)`` where:
+
+      * ``target_dir`` is the (not-yet-resolved) directory the finished
+        file should land in.
+      * ``stem`` is the clean output stem -- no path separators, no
+        extension. Only this is ever sent to the server as the export
+        name, so a user-supplied path can't be mangled into the on-disk
+        filename.
+      * ``dir_source`` is ``"output_name"`` (directory parsed from ``-o``),
+        ``"output_dir"`` (the ``--output-dir`` flag), or ``"cwd"``. It
+        drives the missing-directory policy in ``_ensure_output_dir``.
+
+    Precedence for the directory: an explicit directory component in
+    ``-o`` wins, then ``--output-dir``, then the current working
+    directory. A bare filename in ``-o`` (no directory component) sets
+    the stem but leaves the directory choice to ``--output-dir``/cwd.
+    """
+    stem = default_stem
+    if output_name:
+        expanded = Path(os.path.expanduser(output_name))
+        name = expanded.name
+        if name.lower().endswith(".mp4"):
+            name = name[:-len(".mp4")]
+        # Fall back to the default stem if -o was e.g. just "foo/" with
+        # no filename component, so we never end up with an empty stem.
+        stem = name or default_stem
+
+        parent = expanded.parent
+        if str(parent) not in (".", ""):
+            return parent, stem, "output_name"
+
+    if output_dir_flag:
+        return Path(output_dir_flag), stem, "output_dir"
+
+    return Path.cwd(), stem, "cwd"
+
+
+def _ensure_output_dir(target_dir: Path, source: str) -> Path:
+    """Resolve ``target_dir`` and ensure it exists, per the create policy.
+
+    Returns the resolved absolute directory. The policy depends on where
+    the directory came from (``source``):
+
+      * ``"output_dir"`` -- the explicit ``--output-dir`` flag (the web
+        service's delivery contract): auto-create. A deliberate,
+        caller-specified target, so creating it needs no confirmation.
+      * ``"cwd"`` -- the current working directory: already exists; just
+        resolve.
+      * ``"output_name"`` -- a directory parsed out of ``-o``:
+          - exists            -> use it
+          - missing + TTY     -> prompt "(y/n)"; create on yes, else exit
+          - missing + non-TTY -> graceful exit, create nothing
+
+    This guarantees a missing ``-o`` directory is only ever created after
+    an explicit human confirmation -- never silently in a scripted run.
+    """
+    resolved = target_dir.resolve()
+    reporter = get_reporter()
+
+    if source == "output_dir":
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved
+    if source == "cwd":
+        return resolved
+
+    # source == "output_name": directory parsed from -o.
+    if resolved.is_dir():
+        return resolved
+
+    if sys.stdin.isatty():
+        answer = input(
+            f"{resolved} doesn't exist. Create it? (y/n) "
+        ).strip().lower()
+        if answer in ("y", "yes"):
+            resolved.mkdir(parents=True, exist_ok=True)
+            return resolved
+        reporter.error("ConfigError", "Aborted: output directory not created.")
+        exit(1)
+
+    reporter.error(
+        "ConfigError",
+        (
+            f"Output directory {resolved} does not exist "
+            f"(cannot prompt to create it in non-interactive mode)."
+        ),
+    )
+    exit(1)
+
+
 def _finalize_extract_output_dir(
     output_dir: Path,
     output_stem: str,
-    multiplier: int,
     compressed_path: Path,
+    raw_path: Path,
+    timelapsed_path: Path,
 ) -> str:
-    """Collapse the extract pipeline's three outputs into one deliverable.
+    """Collapse the extract pipeline's outputs into one deliverable.
 
-    The extract pipeline writes three files inside ``output_dir``:
+    The extract pipeline produces three files:
 
-      1. ``{stem}.mp4``                              -- raw download
-      2. ``{stem}_{multiplier}x.mp4``                -- timelapsed
-      3. ``{stem}_{multiplier}x_libx264_{quality}.mp4`` -- final compressed
-         (received here as ``compressed_path``)
+      1. the raw download        (``raw_path``)
+      2. the timelapsed clip     (``timelapsed_path``)
+      3. the final compressed clip (``compressed_path``)
 
-    This deletes (1) and (2), then renames (3) to ``{output_dir}/{stem}.mp4``
-    so the directory contains exactly one user-facing file -- the
-    finished artifact. The web service depends on this contract: when
-    it spawns the CLI with ``--output-dir=<exports/>``, the file it
+    This deletes (1) and (2), then renames (3) to
+    ``{output_dir}/{output_stem}.mp4`` so the directory contains exactly
+    one user-facing file -- the finished artifact -- with a clean
+    stem-based name and no codec suffix. Cleanup operates on the actual
+    intermediate paths (not names reconstructed from the stem), so it
+    stays correct even if the server's Content-Disposition name differs
+    slightly from our stem. The web service depends on this contract:
+    when it spawns the CLI with ``--output-dir=<exports/>``, the file it
     finds at the reported ``done.output`` path is the only one left
-    behind, with a clean stem-based name and no codec suffix to strip.
+    behind.
 
     Cleanup failures (unlink races, permission glitches) are logged as
     warnings but don't fail the job -- the user already has the final
@@ -1141,14 +1241,16 @@ def _finalize_extract_output_dir(
         Absolute path to the renamed deliverable, as a string (matches
         the type ``reporter.done(output=...)`` expects).
     """
-    raw = output_dir / f"{output_stem}.mp4"
-    timelapsed = output_dir / f"{output_stem}_{multiplier}x.mp4"
-    deliverable = output_dir / f"{output_stem}.mp4"  # same path as `raw`; raw must be deleted first
+    deliverable = output_dir / f"{output_stem}.mp4"
 
     reporter = get_reporter()
-    for path in (raw, timelapsed):
+    for path in (raw_path, timelapsed_path):
+        # Never delete the deliverable slot itself: the compressed file is
+        # about to be moved there, and the raw download may already share
+        # that exact path (when the server named it {stem}.mp4). `replace`
+        # below overwrites it atomically.
         try:
-            if path.is_file():
+            if path != deliverable and path.is_file():
                 path.unlink()
         except OSError as exc:
             reporter.warning(
@@ -1156,9 +1258,7 @@ def _finalize_extract_output_dir(
             )
 
     # `Path.replace` is the cross-platform atomic-on-same-filesystem
-    # rename; it overwrites the destination if it somehow still exists
-    # (we just deleted `raw`, which IS the destination, so the slot
-    # should be empty -- but defensive code never hurts here).
+    # rename; it overwrites the destination if it still exists.
     compressed_path.replace(deliverable)
     return str(deliverable)
 
@@ -1506,33 +1606,34 @@ def main():
                     )
                     exit(1)
 
-            # If the user didn't pass -o, build the canonical default output
-            # stem from the same shared helper the web service uses. Without
-            # this the exacqvision server picks the filename via
-            # Content-Disposition, which is unpredictable and doesn't sort by
-            # date the way our convention does.
+            # Resolve the delivery directory and a clean output stem (no
+            # path separators, no extension). Only the bare stem is ever
+            # sent to the server as the export name, so a user-supplied
+            # path in -o can't be mangled into the on-disk filename. When
+            # -o is omitted we fall back to the canonical default stem the
+            # web service uses (so files sort by date and don't depend on
+            # the server's Content-Disposition).
             #
-            # Mutating settings here (rather than threading a local
-            # through) keeps the rest of the extract pipeline -- which
-            # already reads settings.output_filename in multiple places
-            # -- working without modification.
-            if not settings.output_filename:
-                settings.output_filename = default_output_stem(
-                    start,
-                    settings.server,
-                    settings.camera_alias,
-                    settings.timelapse_multiplier,
-                )
-
-            # Normalize --output-dir into an absolute Path. Resolving early
-            # means subsequent path math (the intermediate cleanup at the
-            # end of the pipeline) works regardless of whether the caller
-            # passed a relative or absolute argument, or whether the CWD
-            # changes mid-run for any reason.
-            extract_output_dir: "Path | None" = None
-            if settings.output_dir:
-                extract_output_dir = Path(settings.output_dir).resolve()
-                extract_output_dir.mkdir(parents=True, exist_ok=True)
+            # `_ensure_output_dir` applies the missing-directory policy:
+            # an explicit -o directory is created only after a TTY "(y/n)"
+            # confirmation (graceful failure in non-interactive runs),
+            # while --output-dir (the web contract) auto-creates and cwd
+            # already exists. Mutating settings.output_filename here keeps
+            # the rest of the pipeline -- which reads it in several places
+            # -- working unchanged.
+            default_stem = default_output_stem(
+                start,
+                settings.server,
+                settings.camera_alias,
+                settings.timelapse_multiplier,
+            )
+            target_dir, output_stem, dir_source = _resolve_extract_output(
+                settings.output_filename,
+                settings.output_dir,
+                default_stem,
+            )
+            extract_output_dir = _ensure_output_dir(target_dir, dir_source)
+            settings.output_filename = output_stem
 
             # Fast pre-flight: confirm the target server is reachable on the
             # network before any login/export work, so an unreachable host
@@ -1552,11 +1653,11 @@ def main():
             exapi = None
             try:
                 exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
-                # When `extract_output_dir` is set, the raw download lands
-                # in that directory; `process_video` and `compress_video`
-                # both default to writing next to their input, so the
-                # whole pipeline naturally flows into the same directory
-                # without any further threading.
+                # The raw download lands in `extract_output_dir` (always
+                # set); `process_video` and `compress_video` both default
+                # to writing next to their input, so the whole pipeline
+                # naturally flows into the same directory without any
+                # further threading.
                 extracted_video_name = exapi.get_video(
                     settings.camera_id,
                     start,
@@ -1597,21 +1698,20 @@ def main():
             processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
             final_path = compress_video(processed_video_path)
 
-            # When --output-dir is set, collapse the three pipeline files
-            # down to a single deliverable: delete the raw download and
-            # the timelapsed intermediate, then rename the compressed
-            # file to a bare `{stem}.mp4`. This is the programmatic-
-            # delivery contract -- the web service relies on this so it
-            # can spawn the CLI with --output-dir=<exports/> and treat
-            # the resulting file as the finished artifact, with no
-            # follow-up move/cleanup work.
-            if extract_output_dir is not None:
-                final_path = _finalize_extract_output_dir(
-                    extract_output_dir,
-                    output_stem=settings.output_filename,
-                    multiplier=settings.timelapse_multiplier,
-                    compressed_path=Path(final_path),
-                )
+            # Collapse the three pipeline files down to a single
+            # deliverable: delete the raw download and the timelapsed
+            # intermediate, then rename the compressed file to a bare
+            # `{stem}.mp4` in the resolved output directory. This always
+            # runs now -- the CLI direct path and the web service
+            # (--output-dir=<exports/>) both end up with exactly one
+            # clean, codec-suffix-free artifact and no follow-up cleanup.
+            final_path = _finalize_extract_output_dir(
+                extract_output_dir,
+                output_stem=settings.output_filename,
+                compressed_path=Path(final_path),
+                raw_path=Path(extracted_video_name),
+                timelapsed_path=Path(processed_video_path),
+            )
 
             # Embed provenance metadata into the final mp4 so the camera
             # alias, server, time range, multiplier, and caption travel

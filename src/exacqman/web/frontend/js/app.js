@@ -98,6 +98,17 @@ class ExacqManApp {
             maxLength: 30,
             valueStateKey: 'selectedFilename',
             validStateKey: 'filenameValid',
+            errorId: 'filename-error',
+            // Reject filenames that are actually paths (or carry other
+            // filesystem-unsafe characters). Mirrors the backend's
+            // normalize_filename guard so the user gets the red-border +
+            // "Invalid filename" subtext immediately instead of a server
+            // error at submit. Empty is valid -> backend auto-generates.
+            validate: (value) => {
+                const trimmed = (value || '').trim();
+                if (!trimmed) return null;
+                return /[\/\\]/.test(trimmed) ? 'Invalid filename' : null;
+            },
             // Intentionally no storageKey: filename is per-run; clearing it
             // after each extraction lets the backend auto-generate a fresh
             // {date}_{time}_{server}_{camera}_{multiplier}x name.
