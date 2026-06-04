@@ -22,7 +22,13 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from exacqman import paths
-from exacqman.web.api.models import CameraInfo, ConfigInfo
+from exacqman.exacqvision import probe_servers
+from exacqman.web.api.models import (
+    CameraInfo,
+    ConfigInfo,
+    ConnectivityInfo,
+    ServerConnectivity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +151,31 @@ class ConfigService:
         except Exception:
             logger.exception("Error getting config info from %s", config_file)
             raise
+
+    def get_server_connectivity(self, config_file: str) -> ConnectivityInfo:
+        """Probe every server in the config for network reachability.
+
+        Unauthenticated, short-timeout reachability check (shared with the CLI
+        via ``exacqman.exacqvision.probe_servers``) so the web UI and the CLI
+        ``check`` command report identical results. This is blocking I/O; the
+        route runs it off the event loop.
+        """
+        servers = self.get_available_servers(config_file)
+        results = probe_servers(servers)
+        server_status = {
+            name: ServerConnectivity(reachable=res["reachable"], detail=res["detail"])
+            for name, res in results.items()
+        }
+        reachable = sum(1 for s in server_status.values() if s.reachable)
+        if not server_status:
+            summary = "none"
+        elif reachable == len(server_status):
+            summary = "all"
+        elif reachable == 0:
+            summary = "none"
+        else:
+            summary = "some"
+        return ConnectivityInfo(servers=server_status, summary=summary)
 
     def validate_camera(
         self, config_file: str, camera_alias: str, server: Optional[str] = None

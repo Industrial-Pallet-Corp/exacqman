@@ -323,6 +323,20 @@ label {
     background-color: var(--brand-burgundy-dark);
 }
 
+/* Server offline warning: matches the .field-error look (subtle red text);
+   the red outline on the select is applied via the shared .form-control.error
+   class. Shown only when the selected server is unreachable. */
+.server-warning {
+    display: block;
+    margin-top: var(--spacing-1);
+    font-size: var(--font-size-sm);
+    color: var(--error-color);
+}
+
+.server-warning[hidden] {
+    display: none;
+}
+
 /* Job Status Styles */
 .job-list {
     display: flex;

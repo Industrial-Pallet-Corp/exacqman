@@ -303,6 +303,7 @@ class ExacqManApp {
         if (server) {
             window.LocalStorageService.savePreference('server', server);
         }
+        this.updateSelectedServerWarning();
     }
 
     /**
@@ -316,6 +317,8 @@ class ExacqManApp {
             this.state.updateCameras([]);
             this.state.updateServers({});
             this.state.setCurrentConfig(null);
+            this.state.set('connectivity', { servers: {}, summary: null });
+            this.updateSelectedServerWarning();
             // CameraSelector component will handle camera dropdown via state subscription
             this.clearServerSelection();
             return;
@@ -341,12 +344,21 @@ class ExacqManApp {
             
             this.state.updateCameras(cameras);
             this.state.updateServers(configInfo.servers || {});
-            
+
+            // Reset any prior connectivity results before re-probing so stale
+            // annotations from a previously selected config don't linger.
+            this.state.set('connectivity', { servers: {}, summary: null });
+
             // CameraSelector component will handle camera dropdown via state subscription
             this.populateServerSelect(configInfo.servers || {});
-            
+
             console.log('Camera select populated with', cameras.length, 'cameras');
-            
+
+            // Kick off a reachability probe in the background; the form stays
+            // usable while it runs and the offline warning appears if the
+            // selected server turns out to be unreachable.
+            this.refreshConnectivity(configFile);
+
         } catch (error) {
             console.error('Failed to load configuration:', error);
             this.showError('Failed to load configuration. Please try again.');
@@ -689,6 +701,64 @@ class ExacqManApp {
         // subscribers (e.g. the filename placeholder) get the final piece
         // they need to render on initial page load.
         this.state.set('selectedServer', select.value || null);
+
+        // Reflect any existing connectivity result for the (re)selected server.
+        this.updateSelectedServerWarning();
+    }
+
+    /**
+     * Probe the current config's servers for reachability (soft, non-blocking)
+     * and update the offline warning for the selected server. Runs once per
+     * config selection; no manual trigger.
+     */
+    async refreshConnectivity(configFile) {
+        if (!configFile) return;
+        try {
+            const connectivity = await this.api.getConnectivity(configFile);
+            // Guard against a race: if the user switched configs while the
+            // probe was in flight, discard this now-stale result.
+            if (this.state.get('currentConfig') !== configFile) return;
+            this.state.set('connectivity', connectivity || { servers: {}, summary: null });
+        } catch (error) {
+            console.warn('Connectivity check failed:', error);
+            if (this.state.get('currentConfig') === configFile) {
+                this.state.set('connectivity', { servers: {}, summary: null });
+            }
+        } finally {
+            this.updateSelectedServerWarning();
+        }
+    }
+
+    /**
+     * Show an "offline" warning when the currently selected server is known to
+     * be unreachable. Soft by design: the Extract button stays enabled, and a
+     * submitted job will fail gracefully with a "couldn't reach the camera
+     * server" message.
+     */
+    updateSelectedServerWarning() {
+        const warning = document.getElementById('server-warning');
+        const select = document.getElementById('server-select');
+
+        const connectivity = this.state.get('connectivity') || { servers: {} };
+        const servers = connectivity.servers || {};
+        const selected = this.state.get('selectedServer');
+        const status = selected ? servers[selected] : null;
+        const offline = !!(status && !status.reachable);
+
+        // Red outline on the select (shared .error style), mirroring the
+        // field-validation look used elsewhere.
+        if (select) select.classList.toggle('error', offline);
+
+        if (warning) {
+            if (offline) {
+                const reason = status.detail ? ` (${status.detail})` : '';
+                warning.textContent = `Server appears to be offline${reason}`;
+                warning.hidden = false;
+            } else {
+                warning.textContent = '';
+                warning.hidden = true;
+            }
+        }
     }
 
     /**
@@ -702,6 +772,7 @@ class ExacqManApp {
         select.disabled = true;
         select.required = false;
         this.state.set('selectedServer', null);
+        this.updateSelectedServerWarning();
     }
 
     /**

@@ -126,6 +126,15 @@ class ExacqManAPI {
         return await this.request(`/cameras/${encodeURIComponent(configFile)}`);
     }
 
+    /**
+     * Probe network reachability of every server in a configuration.
+     * @param {string} configFile - Configuration file path
+     * @returns {Promise<Object>} {servers: {name: {reachable, detail}}, summary}
+     */
+    async getConnectivity(configFile) {
+        return await this.request(`/connectivity/${encodeURIComponent(configFile)}`);
+    }
+
     // Extraction workflow
 
     /**

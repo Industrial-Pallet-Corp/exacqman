@@ -124,6 +124,16 @@ class ConfigInfo(BaseModel):
     servers: Dict[str, str] = Field(..., description="Available servers")
     timelapse_options: List[int] = Field(..., description="Available timelapse multipliers")
 
+class ServerConnectivity(BaseModel):
+    """Reachability result for a single server."""
+    reachable: bool = Field(..., description="Whether the server answered at the HTTP layer")
+    detail: str = Field("", description="Short human-readable reason when unreachable")
+
+class ConnectivityInfo(BaseModel):
+    """Reachability results for every server in a config file."""
+    servers: Dict[str, ServerConnectivity] = Field(..., description="Per-server reachability, keyed by server name")
+    summary: str = Field(..., description="Overall status: 'all', 'some', or 'none' reachable")
+
 class Job(BaseModel):
     """A single extraction job tracked by the server-side queue.
 

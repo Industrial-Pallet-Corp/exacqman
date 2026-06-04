@@ -213,12 +213,11 @@ class CameraSelector {
     validateSelection() {
         const selectedCamera = this.selectElement.value;
         const isValid = selectedCamera && selectedCamera !== '';
-        
-        if (!isValid && this.selectElement.value === '') {
-            this.showError('Please select a camera');
-        } else {
-            this.clearError();
-        }
+
+        // No inline "required" message or red outline for an empty selection:
+        // the disabled Extract button already communicates that a camera must
+        // be chosen. Just clear any prior error styling (e.g. a load failure).
+        this.clearError();
 
         return isValid;
     }

@@ -13,6 +13,20 @@ from requests.exceptions import RequestException
 from exacqman.progress import init_reporter, get_reporter
 
 
+# Request timeouts (seconds). Without these, an unreachable host hangs on the
+# OS socket default (often 1+ minute) before failing; bounding them makes both
+# the CLI and the web service fail fast and gracefully.
+#   * CONNECT_TIMEOUT -- cap on establishing the TCP connection.
+#   * READ_TIMEOUT    -- cap on inactivity between received bytes (per-read,
+#     not total), so long-but-active streaming downloads are unaffected.
+#   * PROBE_TIMEOUT   -- short total budget for the unauthenticated
+#     reachability probe.
+CONNECT_TIMEOUT = 5
+READ_TIMEOUT = 30
+PROBE_TIMEOUT = 3
+REQUEST_TIMEOUT = (CONNECT_TIMEOUT, READ_TIMEOUT)
+
+
 class ExacqvisionError(Exception):
     """Custom exception for Exacqvision API errors."""
     pass
@@ -21,6 +35,63 @@ class ExacqvisionError(Exception):
 class ExacqvisionTimeoutError(ExacqvisionError):
     """Custom exception for Exacqvision API timeout errors."""
     pass
+
+
+def probe_server(base_url: str, timeout: float = PROBE_TIMEOUT) -> dict:
+    """Check whether an Exacqvision server is reachable on the network.
+
+    This is an unauthenticated, lightweight check: any HTTP response (even an
+    error status) means the host is reachable. Only connection-level failures
+    (refused, DNS, timeout) count as unreachable. Credentials are intentionally
+    not used -- auth problems surface later as a ``CredentialsError`` at extract
+    time.
+
+    Args:
+        base_url: The server's base URL (the ``url`` field from the config).
+        timeout: Total seconds to wait before treating the host as unreachable.
+
+    Returns:
+        ``{"reachable": bool, "detail": str}`` where ``detail`` is a short,
+        human-readable reason when unreachable (empty when reachable).
+    """
+    if not base_url:
+        return {"reachable": False, "detail": "no URL configured"}
+
+    try:
+        # stream=True so we don't download the body; we only care that the
+        # server answered at the HTTP layer.
+        response = requests.get(base_url, timeout=timeout, stream=True)
+        response.close()
+        return {"reachable": True, "detail": ""}
+    except requests.exceptions.Timeout:
+        return {"reachable": False, "detail": f"timed out after {timeout}s"}
+    except requests.exceptions.ConnectionError:
+        return {"reachable": False, "detail": "connection refused or host unreachable"}
+    except RequestException as exc:
+        return {"reachable": False, "detail": str(exc)}
+
+
+def probe_servers(servers: dict, timeout: float = PROBE_TIMEOUT) -> dict:
+    """Probe many servers concurrently.
+
+    Args:
+        servers: Mapping of ``server_name -> base_url``.
+        timeout: Per-server reachability budget (see ``probe_server``).
+
+    Returns:
+        Mapping of ``server_name -> {"reachable": bool, "detail": str}``.
+    """
+    if not servers:
+        return {}
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = list(servers)
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+        results = pool.map(
+            lambda name: (name, probe_server(servers[name], timeout)), names
+        )
+        return {name: result for name, result in results}
 
 
 class Exacqvision:
@@ -59,7 +130,7 @@ class Exacqvision:
         }
 
         try:
-            response = requests.request("POST", url, headers=headers, data=payload)
+            response = requests.request("POST", url, headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
         except RequestException as e:
             raise ExacqvisionError(
                 f"Could not reach the Exacqvision server at {self.base_url}: {e}"
@@ -94,7 +165,7 @@ class Exacqvision:
 
         if self.session:
             url = f"{self.base_url}/v1/logout.web?s={self.session}"
-            response = requests.request("POST", url)
+            response = requests.request("POST", url, timeout=REQUEST_TIMEOUT)
             return response.text
         else:
             print("No active session to logout.")
@@ -109,7 +180,7 @@ class Exacqvision:
         """
         url = f"{self.base_url}/v1/config.web?s={self.session}&output=json"
 
-        response = requests.request("GET", url)
+        response = requests.request("GET", url, timeout=REQUEST_TIMEOUT)
         cameras = json.loads(response.text)['Cameras']
         return cameras
 
@@ -165,7 +236,7 @@ class Exacqvision:
         url = f"{self.base_url}/v1/search.web?s={self.session}&start={start}&end={stop}&camera={camera_id}&output=json"
 
         try:
-            response = requests.request("GET", url)
+            response = requests.request("GET", url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             # `search_id` is absent when the search produced no results (e.g. a
             # window with no recorded footage). Don't treat that as a hard error
@@ -209,7 +280,7 @@ class Exacqvision:
         reporter = get_reporter()
         reporter.stage("request", "Requesting export from server")
         try:
-            response = requests.request("GET", url)
+            response = requests.request("GET", url, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             export_id = json.loads(response.text).get('export_id')
             if not export_id:
@@ -233,7 +304,7 @@ class Exacqvision:
         """
         url = f"{self.base_url}/v1/export.web?export={export_id}"
 
-        response = requests.request("GET", url)
+        response = requests.request("GET", url, timeout=REQUEST_TIMEOUT)
         progress = int(json.loads(response.text)['progress'])
 
         return progress == 100, progress
@@ -261,7 +332,7 @@ class Exacqvision:
 
         # Setting stream=True is necessary to read the response body in chunks.
         try:
-            response = requests.get(url, stream=True)
+            response = requests.get(url, stream=True, timeout=REQUEST_TIMEOUT)
         except RequestException as e:
             raise ExacqvisionError(
                 f"Could not download export {export_id} from {self.base_url}: {e}"
@@ -332,7 +403,7 @@ class Exacqvision:
         '''Deletes an export request from the server.'''
         url = f"{self.base_url}/v1/export.web?export={export_id}&action=finish"
 
-        response = requests.request("GET", url)
+        response = requests.request("GET", url, timeout=REQUEST_TIMEOUT)
 
         return response.text
 
