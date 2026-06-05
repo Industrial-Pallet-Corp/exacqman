@@ -1364,6 +1364,91 @@ def _resolve_config_path(explicit: "str | None") -> "str | None":
     return str(discovered[0])
 
 
+def _write_credentials_auth(
+    path: Path,
+    username: str,
+    password: str,
+) -> "tuple[bool, str]":
+    """Fill in ``username``/``password`` under ``[auth]`` in a credentials file.
+
+    Edits the file textually (tomllib is read-only) so the template's header
+    comments survive, and validates that the result still parses as TOML
+    *before* writing -- on any problem the file is left untouched and a message
+    is returned for the caller to surface. Values are emitted as TOML basic
+    strings via ``json.dumps`` (JSON's escaping of ``"``, ``\\`` and control
+    characters is valid TOML), with the parse check below as the safety net.
+
+    Re-applies ``0600`` after writing since the file holds auth.
+
+    Returns ``(success, message)``.
+    """
+    try:
+        original = path.read_text()
+    except OSError as e:
+        return False, f"could not read {path.name}: {e}"
+
+    lines = original.splitlines(keepends=True)
+
+    # Find the [auth] table header; key replacement is scoped to its section so
+    # we never touch a stray username/password elsewhere in the file.
+    auth_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip() == "[auth]"),
+        None,
+    )
+    if auth_idx is None:
+        return False, (
+            f"could not locate [auth] in {path.name}; left it unchanged"
+        )
+
+    section_end = len(lines)
+    for j in range(auth_idx + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            section_end = j
+            break
+
+    replacements = {
+        "username": f"username = {json.dumps(username)}\n",
+        "password": f"password = {json.dumps(password)}\n",
+    }
+    seen: set[str] = set()
+    for j in range(auth_idx + 1, section_end):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in replacements and key not in seen:
+            lines[j] = replacements[key]
+            seen.add(key)
+
+    # Append any key the template happened to be missing, so we always end up
+    # with both set.
+    for key in ("username", "password"):
+        if key not in seen:
+            insert_at = section_end
+            if insert_at > 0 and lines[insert_at - 1] and not lines[insert_at - 1].endswith("\n"):
+                lines[insert_at - 1] = lines[insert_at - 1] + "\n"
+            lines.insert(insert_at, replacements[key])
+            section_end += 1
+
+    new_content = "".join(lines)
+    # Safety net: never write something that won't parse back.
+    try:
+        tomllib.loads(new_content)
+    except tomllib.TOMLDecodeError as e:
+        return False, (
+            f"aborted: the edit would produce invalid TOML ({e}); "
+            f"{path.name} unchanged"
+        )
+
+    try:
+        path.write_text(new_content)
+        os.chmod(path, 0o600)
+    except OSError as e:
+        return False, f"could not write {path.name}: {e}"
+
+    return True, f"wrote credentials to {path} (chmod 600)"
+
+
 def _cmd_init(args) -> int:
     """Scaffold config + credentials into the standard config directory.
 
@@ -1387,21 +1472,52 @@ def _cmd_init(args) -> int:
     # sample.credentials -> default.credentials, beside the config so the
     # default `credentials_file` resolution finds it. 0600 because it holds auth.
     target_credentials = cfg_dir / "default.credentials"
+    creds_written = False
     if target_credentials.exists() and not args.force:
         lines.append(f"  kept (exists): {target_credentials}")
     else:
         target_credentials.write_bytes((data / "sample.credentials").read_bytes())
         os.chmod(target_credentials, 0o600)
         lines.append(f"  wrote: {target_credentials}  (chmod 600)")
+        creds_written = True
+
+    # Interactively fill in the credentials we just placed. Only on a real
+    # terminal (an input() prompt would hang a piped/CI run) and only when the
+    # credentials file is fresh this run (or --force re-scaffolded it) -- an
+    # existing, untouched credentials file is never clobbered.
+    creds_filled = False
+    if sys.stdin.isatty() and (creds_written or args.force):
+        username = input("ExacqVision username: ").strip()
+        password = input("ExacqVision password: ").strip()
+        if username or password:
+            ok, message = _write_credentials_auth(
+                target_credentials, username, password
+            )
+            lines.append(f"  {message}")
+            creds_filled = ok
+        else:
+            lines.append(
+                f"  left credentials empty: {target_credentials} (edit it later)"
+            )
 
     print(f"ExacqMan config directory: {cfg_dir}")
     print("\n".join(lines))
-    print(
-        "\nNext steps:\n"
-        f"  1. Edit {target_config} with your servers and cameras.\n"
-        f"  2. Put your ExacqVision username/password in {target_credentials}.\n"
-        "  3. Run `exacqman extract ...` from any directory."
-    )
+
+    # Step 2 is only worth printing when the user still needs to add auth by
+    # hand; once we've written it interactively, drop it and renumber.
+    if creds_filled:
+        print(
+            "\nNext steps:\n"
+            f"  1. Edit {target_config} with your servers and cameras.\n"
+            "  2. Run `exacqman extract ...` from any directory."
+        )
+    else:
+        print(
+            "\nNext steps:\n"
+            f"  1. Edit {target_config} with your servers and cameras.\n"
+            f"  2. Put your ExacqVision username/password in {target_credentials}.\n"
+            "  3. Run `exacqman extract ...` from any directory."
+        )
     return 0
 
 
