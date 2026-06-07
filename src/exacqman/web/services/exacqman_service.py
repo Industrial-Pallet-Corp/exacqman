@@ -156,13 +156,21 @@ class ExacqManService:
         """
         cmd_args = []
         try:
+            # `server` is the first positional of the `extract` verb and is
+            # required, so fail fast (and cleanly) if the request didn't carry
+            # one rather than building a malformed command line.
+            if not request.server:
+                raise ExtractFailure(
+                    "ConfigError", "No server selected for extraction."
+                )
+
             output_filename = self._generate_output_filename(request)
             exports_dir = paths.ensure_dir(paths.exports_dir()).resolve()
             config_path = self._resolve_config_path(request.config_file)
 
             # Build command arguments. We use flag forms exclusively (except for
-            # the leading `camera_alias` positional) so the call is unambiguous
-            # and order-independent:
+            # the two leading positionals `server` and `camera_alias`, in that
+            # order) so the call is unambiguous and order-independent:
             #
             #   * `--config` instead of the positional `config_file` -- the
             #     positional `extract` form would normally also require `date`,
@@ -196,6 +204,7 @@ class ExacqManService:
                 sys.executable, "-u", "-m", "exacqman",
                 "--progress-format=json",
                 "extract",
+                request.server,
                 request.camera_alias,
                 "--config", str(config_path),
                 "--start-iso-datetime", request.start_datetime.isoformat(),
@@ -205,9 +214,6 @@ class ExacqManService:
                 "-o", output_filename,
                 "--output-dir", str(exports_dir),
             ]
-
-            if request.server:
-                cmd_args.extend(["--server", request.server])
 
             if request.caption:
                 cmd_args.extend(["--caption", request.caption])
