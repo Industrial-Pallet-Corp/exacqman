@@ -817,6 +817,7 @@ def parse_arguments():
 
     # Extract mode subcommand
     extract_parser = subparsers.add_parser('extract', help='Extract, timelapse, and compress a video file')
+    extract_parser.add_argument('server', type=str, help='Server name (required; first positional, must match a top-level [<server>] table in the config file)')
     extract_parser.add_argument('camera_alias', type=str, help='Name of camera wanted (required)')
     extract_parser.add_argument('date', nargs='?', default=None, type=str, help='Date of the requested video. If the footage spans past midnight, provide the date on which the footage starts. (e.g. 3/11)')
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
@@ -877,7 +878,6 @@ def parse_arguments():
             'in the config. One of the two must be set.'
         ),
     )
-    extract_parser.add_argument('--server', type=str, help='Server name (must match a top-level [<server>] table in the config file)')
     extract_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
     extract_parser.add_argument(
         '--output-dir',
@@ -923,7 +923,8 @@ def parse_arguments():
         'crop',
         help='Grab a recent frame and pick crop dimensions for a camera (CLI-only).',
     )
-    crop_parser.add_argument('--camera', type=str, required=True, dest='camera_alias', help='Camera alias (required; must match a [<server>.<alias>] entry).')
+    crop_parser.add_argument('server', type=str, help='Server name (required; first positional, must match a top-level [<server>] table in the config file).')
+    crop_parser.add_argument('camera_alias', type=str, help='Camera alias (required; second positional, must match a [<server>.<alias>] entry).')
     crop_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
     crop_parser.add_argument(
         '--config',
@@ -938,7 +939,6 @@ def parse_arguments():
         default=None,
         help='Path to TOML credentials file. Overrides settings.credentials_file in the config.',
     )
-    crop_parser.add_argument('--server', type=str, help='Server name (must match a top-level [<server>] table in the config file).')
     crop_parser.add_argument(
         '--lookback-minutes',
         type=int,
@@ -1622,7 +1622,7 @@ def main():
             if not settings.server:
                 reporter.error(
                     "ConfigError",
-                    "No server selected. Pass --server <name> (must match a top-level [<server>] table in the config).",
+                    "No server selected. Provide the server as the first argument (must match a top-level [<server>] table in the config).",
                 )
                 exit(1)
             if not settings.server_ip:
@@ -1863,7 +1863,7 @@ def main():
             if not settings.server:
                 reporter.error(
                     "ConfigError",
-                    "No server selected. Pass --server <name> (must match a top-level [<server>] table in the config).",
+                    "No server selected. Provide the server as the first argument (must match a top-level [<server>] table in the config).",
                 )
                 exit(1)
             if not settings.server_ip:

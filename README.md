@@ -38,7 +38,7 @@ exacqman --help
 ```bash
 exacqman init                       # scaffold config + credentials into the standard config dir
 # edit the printed default.config (servers, cameras) and default.credentials (username/password)
-exacqman extract dock-10 5/30 9am 9:05am --server ch
+exacqman extract ch dock-10 5/30 9am 9:05am
 ```
 
 `exacqman init` copies the bundled templates into the [config directory](#configuration) and prints the exact paths plus next steps. The credentials file is written with `0600` permissions.
@@ -118,16 +118,16 @@ Run `exacqman --help` (or `exacqman <command> --help`) for full options. Five co
 ### extract
 
 ```bash
-exacqman extract camera_alias [date] [start] [end] [config_file] \
-  [--config CONFIG] [--credentials CREDENTIALS] [--server SERVER] \
+exacqman extract server camera_alias [date] [start] [end] [config_file] \
+  [--config CONFIG] [--credentials CREDENTIALS] \
   [-o OUTPUT_NAME] [--output-dir DIR] [--quality {low,medium,high}] \
   [--multiplier N] [-c {true,false}] [--caption TEXT]
 ```
 
+- `server` (required, first positional): server name, must match a top-level `[<server>]` table.
 - `camera_alias` (required), `date` (`M/D` or `M/D/YYYY`), `start`/`end` (e.g. `6pm`, `18:30`).
 - `config_file` / `--config`: config to use; omit to auto-discover (see [Configuration](#configuration)).
 - `--start-iso-datetime` / `--end-iso-datetime`: ISO 8601 datetimes (e.g. `2026-05-27T09:30:00-04:00`). When given together they replace the positional `date`/`start`/`end` form with full, unambiguous precision — intended for programmatic callers (the web UI uses these).
-- `--server`: server name (must match a top-level `[<server>]` table).
 - `-o, --output_name`: output filename. When omitted, a canonical `{YYYY-MM-DD}_{HHMM}_{server}_{camera}_{multiplier}x.mp4` name is built.
 - `--output-dir`: deliver a single clean `{name}.mp4` into this directory (intermediates removed). Defaults to the current directory.
 - `--quality`, `--multiplier`, `-c/--crop {true,false}`, `--caption`.
@@ -147,9 +147,12 @@ exacqman timelapse video_filename multiplier [-o OUTPUT_NAME] [-c {true,false}] 
 ### crop
 
 ```bash
-exacqman crop --camera CAMERA [config_file] [--config CONFIG] \
-  [--credentials CREDENTIALS] [--server SERVER] [--lookback-minutes N]
+exacqman crop server camera_alias [config_file] [--config CONFIG] \
+  [--credentials CREDENTIALS] [--lookback-minutes N]
 ```
+
+- `server` (required, first positional): server name, must match a top-level `[<server>]` table.
+- `camera_alias` (required, second positional): camera alias, must match a `[<server>.<alias>]` entry.
 
 Grabs a short clip from ~now, opens the interactive ROI selector on its first frame, and prints `crop_dimensions` / `default_crop_dimensions` lines ready to paste into your config (it can also offer to write them back automatically). Opens a GUI window, so it requires a display.
 
@@ -165,10 +168,10 @@ Copies the bundled `default.config` and `default.credentials` templates into the
 
 ```bash
 exacqman init
-exacqman extract front_door 3/11 6pm 8pm --server ch --multiplier 10 -c true
+exacqman extract ch front_door 3/11 6pm 8pm --multiplier 10 -c true
 exacqman compress input.mp4 medium -o compressed.mp4
 exacqman timelapse input.mp4 5 -c true
-exacqman crop --camera front_door --server ch
+exacqman crop ch front_door
 ```
 
 ### Listing cameras
