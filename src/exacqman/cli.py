@@ -977,6 +977,25 @@ def parse_arguments():
     )
     check_parser.add_argument('--server', type=str, help='Check only this server (must match a top-level [<server>] table); default checks all.')
 
+    # list-cameras subcommand: log into the configured server(s) and print the
+    # cameras they report (with local-alias cross-reference). Like `check`, it
+    # is a multi-server diagnostic, so --server is optional and defaults to all.
+    list_cameras_parser = subparsers.add_parser(
+        'list-cameras',
+        help='List the cameras reported by the Exacqvision servers in the config.',
+    )
+    list_cameras_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config).')
+    list_cameras_parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        dest='config_flag',
+        help='Filepath of local TOML config file. Flag-form alternative to the positional config_file.',
+    )
+    list_cameras_parser.add_argument('--credentials', type=str, default=None, help='Path to a TOML credentials file. Overrides settings.credentials_file in the config.')
+    list_cameras_parser.add_argument('--server', type=str, default=None, help='List only this server (must match a top-level [<server>] table); default lists all.')
+    list_cameras_parser.add_argument('--json', dest='as_json', action='store_true', help='Emit machine-readable JSON instead of the default text table.')
+
     return arg_parser.parse_args()
 
 
@@ -2071,6 +2090,27 @@ def main():
             else:
                 reporter.info(summary, summary=True, reachable_count=reachable_count, total=len(results))
             sys.exit(1 if unreachable else 0)
+
+        elif args.command == 'list-cameras':
+            # Needs a config (servers, cameras, timezone, credentials path all
+            # live there) and credentials (we log in to enumerate cameras).
+            # `auth` is resolved by main() for every command except `check`.
+            if not config:
+                reporter.error(
+                    "ConfigError",
+                    "list-cameras requires a config file. Provide it positionally or with --config.",
+                )
+                exit(1)
+            from exacqman.inspect import list_cameras as _list_cameras
+            sys.exit(
+                _list_cameras(
+                    config,
+                    auth,
+                    ZoneInfo(settings.timezone),
+                    server=getattr(args, 'server', None),
+                    as_json=args.as_json,
+                )
+            )
 
         elif args.command == 'compress':
             final_path = compress_video(settings.input_filename, settings.output_filename)

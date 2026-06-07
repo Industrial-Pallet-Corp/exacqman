@@ -176,10 +176,13 @@ exacqman crop ch front_door
 
 ### Listing cameras
 
-The `exacqvision` module doubles as a read-only inspection utility:
+`list-cameras` logs into the configured server(s) and prints the cameras they
+report, cross-referenced against the aliases in your config:
 
 ```bash
-python -m exacqman.exacqvision --config <file> --credentials <file> [--server ch] --list-cameras
+exacqman list-cameras                # every server in the discovered config
+exacqman list-cameras --server ch    # just one server
+exacqman list-cameras --json         # machine-readable
 ```
 
 ## Web UI
