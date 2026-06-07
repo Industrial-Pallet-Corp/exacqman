@@ -3,14 +3,14 @@ exacqman_config.py
 
 Shared TOML config + credentials loading for ExacqMan.
 
-Two callers consume this module: the main CLI (``exacqman.py``) and the
-``--list-cameras`` utility CLI in ``exacqvision.py``. Both need to parse
-the same config + credentials files using identical rules, and surface
-validation errors through the same progress reporter. Centralising the
-loaders here keeps the two CLIs from drifting in subtle ways (which
-fields are required, where credentials live, etc.) and avoids forcing
-``exacqvision.py`` to import the heavy ``moviepy`` / ``cv2``
-dependencies that ``exacqman.py`` pulls in at module load.
+Several callers consume this module: the main CLI (``cli.py``, including its
+``list-cameras`` subcommand) and the inspection helpers in ``inspect.py``.
+They all need to parse the same config + credentials files using identical
+rules, and surface validation errors through the same progress reporter.
+Centralising the loaders here keeps the callers from drifting in subtle ways
+(which fields are required, where credentials live, etc.) and avoids forcing
+lightweight consumers to import the heavy ``moviepy`` / ``cv2`` dependencies
+that ``cli.py`` pulls in at module load.
 
 Public surface:
 
