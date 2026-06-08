@@ -239,8 +239,9 @@ class CameraSelector {
     isFormReady() {
         const configSelected = this.configSelect && this.configSelect.value;
         const cameraSelected = this.selectElement && this.selectElement.value;
-        
-        return configSelected && cameraSelected;
+        const dateTimeValid = this.state.get('dateTimeValid');
+
+        return configSelected && cameraSelected && dateTimeValid !== false;
     }
 
     /**
