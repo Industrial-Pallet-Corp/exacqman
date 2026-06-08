@@ -956,7 +956,11 @@ def parse_arguments():
     )
     init_parser.add_argument(
         '--force', '-f', action='store_true',
-        help='Overwrite existing files in the config directory.',
+        help='Restore defaults: overwrite default.config and default.credentials in the config directory (erases saved credentials).',
+    )
+    init_parser.add_argument(
+        '--yes', '-y', action='store_true',
+        help='Skip the confirmation prompt when --force would erase saved credentials (required for --force in a non-interactive shell).',
     )
 
     # Check subcommand: probe each server in the config for network
@@ -1468,6 +1472,26 @@ def _write_credentials_auth(
     return True, f"wrote credentials to {path} (chmod 600)"
 
 
+def _credentials_are_populated(path: Path) -> bool:
+    """True if `path` holds a non-blank username or password under ``[auth]``.
+
+    Used to decide whether ``init --force`` must confirm before wiping a saved
+    credentials file. A missing file, or one whose auth values are blank (the
+    pristine template), has nothing worth protecting. An unreadable or
+    unparseable existing file returns True so we err toward asking before
+    destroying it.
+    """
+    if not path.exists():
+        return False
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return True  # can't verify -> protect it
+    auth = data.get("auth") or {}
+    return bool(str(auth.get("username") or "").strip()
+                or str(auth.get("password") or "").strip())
+
+
 def _cmd_init(args) -> int:
     """Scaffold config + credentials into the standard config directory.
 
@@ -1482,15 +1506,38 @@ def _cmd_init(args) -> int:
     lines: list[str] = []
 
     target_config = cfg_dir / "default.config"
+    # default.credentials lives beside the config so the default
+    # `credentials_file` resolution finds it. 0600 because it holds auth.
+    target_credentials = cfg_dir / "default.credentials"
+
+    # --force is a destructive "restore to defaults": it overwrites both files
+    # below. Guard the one irreversible part -- erasing saved credentials --
+    # behind a confirmation, but only when there's actually something to lose
+    # (an existing default.credentials with a populated username/password).
+    # Done before any write so an aborted confirmation leaves both files intact.
+    if args.force and _credentials_are_populated(target_credentials):
+        if sys.stdin.isatty():
+            answer = input(
+                f"--force will erase the saved credentials in {target_credentials} "
+                "and restore defaults. Continue? (y/n) "
+            ).strip().lower()
+            if answer not in ("y", "yes"):
+                print("Aborted; nothing was changed.")
+                return 1
+        elif not args.yes:
+            get_reporter().error(
+                "Aborted",
+                f"--force would erase saved credentials in {target_credentials}; "
+                "re-run with --yes to confirm in a non-interactive shell.",
+            )
+            return 1
+
     if target_config.exists() and not args.force:
         lines.append(f"  kept (exists): {target_config}")
     else:
         target_config.write_bytes((data / "default.config").read_bytes())
         lines.append(f"  wrote: {target_config}")
 
-    # sample.credentials -> default.credentials, beside the config so the
-    # default `credentials_file` resolution finds it. 0600 because it holds auth.
-    target_credentials = cfg_dir / "default.credentials"
     creds_written = False
     if target_credentials.exists() and not args.force:
         lines.append(f"  kept (exists): {target_credentials}")
