@@ -95,6 +95,7 @@ class DateTimePicker {
      * Handle start datetime change
      */
     handleStartChange() {
+        this.syncDateAcross(this.startInput, this.endInput);
         this.validateStartTime();
         this.validateBoth(); // Also validate the range
         this.updateState();
@@ -105,10 +106,30 @@ class DateTimePicker {
      * Handle end datetime change
      */
     handleEndChange() {
+        this.syncDateAcross(this.endInput, this.startInput);
         this.validateEndTime();
         this.validateBoth(); // Also validate the range
         this.updateState();
         this.updateExtractionButton();
+    }
+
+    /**
+     * Copy the changed input's calendar date onto the other input, keeping the
+     * other input's time of day. Keeps both pickers on the same day without
+     * touching the time -- even if the result is chronologically inverted or
+     * exceeds the max duration (that's surfaced by validation, not clamped
+     * here). Uses string splicing on the fixed `YYYY-MM-DDTHH:MM` format to
+     * avoid Date parse/format timezone drift. Assigning `.value` does not fire
+     * a `change` event, so there is no sync feedback loop.
+     */
+    syncDateAcross(sourceInput, targetInput) {
+        const src = sourceInput.value;
+        const tgt = targetInput.value;
+        if (!src || !tgt) return;
+        const srcDate = src.slice(0, src.indexOf('T'));   // YYYY-MM-DD
+        const tgtTime = tgt.slice(tgt.indexOf('T') + 1);  // HH:MM
+        const combined = `${srcDate}T${tgtTime}`;
+        if (combined !== tgt) targetInput.value = combined;
     }
 
     /**
@@ -216,7 +237,12 @@ class DateTimePicker {
         
         this.state.set('startDateTime', startValue);
         this.state.set('endDateTime', endValue);
-        
+
+        // Publish range validity so the other button-gating components
+        // (MultiplierSelector, CameraSelector) can keep Extract disabled on an
+        // illegal range, mirroring the captionValid / filenameValid flags.
+        this.state.set('dateTimeValid', this.isDateTimeRangeValid());
+
         if (startValue && endValue) {
             const startDate = DateUtils.parseFromInput(startValue);
             const endDate = DateUtils.parseFromInput(endValue);
@@ -244,29 +270,30 @@ class DateTimePicker {
     isFormReady() {
         const configSelected = this.state.get('currentConfig');
         const cameraSelected = this.state.get('selectedCamera');
-        
-        // Check if fields have values and are valid without calling validation methods
-        // (which would clear errors)
-        const startValue = this.startInput.value;
-        const endValue = this.endInput.value;
-        
-        // Check individual field validity without clearing errors
-        const startValid = startValue && this.isStartTimeValid();
-        const endValid = endValue && this.isEndTimeValid();
 
-        // Also check range validation if both times are valid
-        let rangeValid = true;
-        if (startValid && endValid) {
-            const validation = DateUtils.validateRange(this.startInput.value, this.endInput.value);
-            rangeValid = validation.valid;
-        }
+        // Single source of truth for required + valid + in-range datetimes.
+        const dateTimeValid = this.isDateTimeRangeValid();
 
         const queueFull = this.state.get('queueFull') === true;
 
-        const formReady = configSelected && cameraSelected && startValid && endValid && rangeValid && !queueFull;
+        const formReady = configSelected && cameraSelected && dateTimeValid && !queueFull;
 
 
         return formReady;
+    }
+
+    /**
+     * True only when both inputs hold valid, present, non-future datetimes that
+     * form a legal range (start before end, within the max duration). Computed
+     * without clearing inline errors so it is safe to call from button-gating
+     * paths. This is the predicate published to state as `dateTimeValid`.
+     */
+    isDateTimeRangeValid() {
+        const startValue = this.startInput.value;
+        const endValue = this.endInput.value;
+        if (!(startValue && this.isStartTimeValid())) return false;
+        if (!(endValue && this.isEndTimeValid())) return false;
+        return DateUtils.validateRange(startValue, endValue).valid;
     }
 
     /**

@@ -169,6 +169,7 @@ class MultiplierSelector {
         const multiplierSelected = this.state.get('selectedMultiplier');
         const captionValid = this.state.get('captionValid');
         const filenameValid = this.state.get('filenameValid');
+        const dateTimeValid = this.state.get('dateTimeValid');
         const queueFull = this.state.get('queueFull') === true;
 
         return (
@@ -177,6 +178,7 @@ class MultiplierSelector {
             multiplierSelected &&
             captionValid !== false &&
             filenameValid !== false &&
+            dateTimeValid !== false &&
             !queueFull
         );
     }
