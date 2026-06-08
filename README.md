@@ -16,7 +16,8 @@ For API testing, [explore the Postman collection](https://weareipc.postman.co/wo
 ### Homebrew (recommended)
 
 ```bash
-brew install <your-tap>/exacqman
+brew tap industrial-pallet-corp/utilities
+brew install exacqman
 ```
 
 This installs both the `exacqman` and `exacqman-web` commands and a bundled `ffmpeg` (via `imageio-ffmpeg`). Config and credentials live in `$(brew --prefix)/etc/exacqman`; see [Configuration](#configuration). To run the web UI as a managed background service, see [Running the web UI as a service](#running-the-web-ui-as-a-service).
