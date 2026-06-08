@@ -14,7 +14,7 @@ from exacqman.exacqman_config import (
     split_servers_and_cameras,
 )
 from exacqman.progress import init_reporter, get_reporter
-from exacqman import paths
+from exacqman import paths, __version__
 import argparse
 import cv2
 import importlib.resources
@@ -796,6 +796,10 @@ def parse_arguments():
     """
 
     arg_parser = argparse.ArgumentParser()
+
+    arg_parser.add_argument(
+        '-v', '--version', action='version', version=f'exacqman {__version__}',
+    )
 
     # Global progress-tracking options apply to every subcommand.
     arg_parser.add_argument(

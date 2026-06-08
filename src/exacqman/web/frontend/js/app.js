@@ -64,7 +64,11 @@ class ExacqManApp {
             
             // Test API connection
             await this.testConnection();
-            
+
+            // Populate the subtle header version badge (non-blocking: a slow
+            // or failed fetch must never hold up app boot).
+            this.loadVersionBadge();
+
             // Load initial data
             await this.loadInitialData();
             
@@ -75,6 +79,19 @@ class ExacqManApp {
             console.error('Failed to initialize application:', error);
             this.showError('Failed to initialize application. Please refresh the page.');
         }
+    }
+
+    /**
+     * Fetch the project version and write it into the subtle header badge.
+     * Intentionally swallows errors -- the badge is cosmetic and must not
+     * affect app startup if the endpoint is unavailable.
+     */
+    async loadVersionBadge() {
+        try {
+            const { version } = await this.api.getVersion();
+            const el = document.getElementById('app-version');
+            if (el && version) el.textContent = `v${version}`;
+        } catch (_) { /* subtle badge; ignore failure */ }
     }
 
     /**
