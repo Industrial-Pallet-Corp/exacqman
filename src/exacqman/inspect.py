@@ -39,6 +39,10 @@ def _decode_camera_state(camera: dict) -> str:
     `disabled == 1` short-circuits to ``DISABLED`` because an administratively
     disabled camera is a different condition from a temporarily unreachable
     one and conflating them would mask config issues.
+
+    The ExacqVision API does not document the `state` field's value set, so any
+    code we don't explicitly recognize (including a missing value) collapses to
+    ``UNKNOWN`` rather than leaking a raw integer.
     """
     if camera.get("disabled") == 1:
         return "DISABLED"
@@ -47,7 +51,7 @@ def _decode_camera_state(camera: dict) -> str:
         return "OK"
     if state in _DISCONNECT_STATE_CODES:
         return "OFFLINE"
-    return f"state={state}" if state is not None else "?"
+    return "UNKNOWN"
 
 
 def _camera_resolution(camera: dict) -> str:
