@@ -27,17 +27,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-# Project root (this file lives at the repo root). Scratch files are kept in a
-# project-local, gitignored directory rather than the system temp dir so they
-# never escape the project tree -- handy on locked-down machines and for
-# predictable cleanup.
+
+
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 TEMP_DIR = PROJECT_ROOT / ".tmp"
 
-# Length of the throwaway clip the `crop` subcommand exports just to grab a
-# single frame for the ROI selector. Kept tiny on purpose: the camera framing
-# is static, so a couple of seconds is plenty, and exporting the full lookback
-# window would download minutes (often gigabytes) of footage we never use.
+
+
+
+
 CROP_PROBE_SECONDS = 2
 
 
@@ -51,34 +51,34 @@ class Settings:
     username: str = None
     password: str = None
 
-    servers: dict = None                # {server_name: url} for all configured servers
-    cameras: dict = None                # {server_name: {alias: {id, crop_dimensions?}}} nested map
+    servers: dict = None                
+    cameras: dict = None                
 
-    timelapse_multiplier: int = 10      # Must be a positive int
-    compression_level: str = 'medium'   # Should be 'low', 'medium', or 'high'
+    timelapse_multiplier: int = 10      
+    compression_level: str = 'medium'   
     timezone: str = None
-    crop: bool = False                  # Does the video need cropped? Crop dimensions only matter if this is True.
-    default_crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Fallback crop applied when the selected camera has no per-camera override
-    crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  # Effective crop for this run: per-camera override if set, else default
-    font_weight: int = 2                # Font thickness
-    caption: str = None                 # Optional caption rendered below the timestamp
-    caption_limit = 30                  # Max number of characters for caption
+    crop: bool = False                  
+    default_crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  
+    crop_dimensions: tuple[tuple[int, int], tuple[int, int]] = None  
+    font_weight: int = 2                
+    caption: str = None                 
+    caption_limit = 30                  
 
-    server: str = None                  # Server name (must match a top-level [<server>] table)
-    server_ip: str = None               # URL of the chosen Exacqvision server
-    camera_alias: str = None            # Camera alias (must match a [<server>.<alias>] entry)
-    camera_id: int = None               # Camera ID resolved from the chosen alias on the chosen server
-    input_filename: str = None          # Video filename that needs processed
-    output_filename: str = None         # Desired name of output file (will always be .mp4)
-    output_dir: str = None              # When set, deliver a single clean .mp4 into this directory and remove intermediates
-    date: str = None                    # MM/DD (e.g. '3/11') -- used by the positional human form
-    start_time: str = None              # Start time of video (e.g. '6 pm', '6:30pm', '18:30')
-    end_time: str = None                # End time of video (e.g. '6 pm', '6:30pm', '18:30')
-    # ISO 8601 datetime pair, populated only from --start-iso-datetime /
-    # --end-iso-datetime. When set, these take precedence over date +
-    # start_time + end_time and skip the year/day fixup heuristics in
-    # `convert_input_to_datetime`. Programmatic callers (the web service)
-    # use these to hand the CLI an unambiguous instant.
+    server: str = None                  
+    server_ip: str = None               
+    camera_alias: str = None            
+    camera_id: int = None               
+    input_filename: str = None          
+    output_filename: str = None         
+    output_dir: str = None              
+    date: str = None                    
+    start_time: str = None              
+    end_time: str = None                
+    
+    
+    
+    
+    
     start_iso_datetime: str = None
     end_iso_datetime: str = None
 
@@ -113,10 +113,10 @@ class Settings:
         auth = auth or {}
         settings_table = config.get('settings', {})
 
-        # Build the flat name->url map and the nested cameras-by-server map via
-        # the shared schema helper, then normalize per-camera crop dimensions to
-        # tuple-of-tuples so the rest of the code can keep treating
-        # crop_dimensions as a tuple.
+        
+        
+        
+        
         servers_by_name, raw_cameras_by_server = split_servers_and_cameras(config)
         cameras_by_server: dict[str, dict[str, dict]] = {}
         for srv_name, cam_table in raw_cameras_by_server.items():
@@ -129,8 +129,8 @@ class Settings:
                 cam_map[str(alias)] = entry
             cameras_by_server[srv_name] = cam_map
 
-        # Resolve the active server and camera. These are per-run values with
-        # no config-file source -- they come from CLI args (args > default).
+        
+        
         server = set_value(
             arg_value='server',
             cls_value=cls.server,
@@ -149,7 +149,7 @@ class Settings:
         )
         camera_id = cam_entry.get('id') if cam_entry else None
 
-        # Resolve effective crop: per-camera override beats the global default.
+        
         default_crop = settings_table.get('default_crop_dimensions')
         if default_crop is not None:
             default_crop = tuple(tuple(pt) for pt in default_crop)
@@ -196,23 +196,23 @@ class Settings:
             camera_alias=camera_alias,
             camera_id=camera_id,
             input_filename=set_value(arg_value='video_filename', cls_value=cls.input_filename),
-            # No config-file source: when -o is omitted, main() builds the
-            # canonical default stem via default_output_stem (same convention
-            # the web service uses).
+            
+            
+            
             output_filename=set_value(
                 arg_value='output_name',
                 cls_value=cls.output_filename,
             ),
-            # Flag-only, since "deliver here" is a per-invocation choice
-            # rather than a stable config-file default. Programmatic
-            # callers (the web service) always pass it; humans typically
-            # cd into their target directory and omit this.
+            
+            
+            
+            
             output_dir=set_value(
                 arg_value='output_dir',
                 cls_value=cls.output_dir,
             ),
-            # Per-run time range comes from CLI args only (positional
-            # date/start/end or the ISO flag pair below) -- no config source.
+            
+            
             date=set_value(
                 arg_value='date',
                 cls_value=cls.date,
@@ -225,9 +225,9 @@ class Settings:
                 arg_value='end',
                 cls_value=cls.end_time,
             ),
-            # ISO 8601 pair, flag-only. Programmatic callers (the web service)
-            # use these to hand the CLI an unambiguous instant; humans can use
-            # either these or the positional date/start/end form.
+            
+            
+            
             start_iso_datetime=set_value(
                 arg_value='start_iso_datetime',
                 cls_value=cls.start_iso_datetime,
@@ -242,13 +242,13 @@ class Settings:
 # Overlay layout constants for `process_video`. Module-level so they're a
 # single, greppable knob and don't get re-bound on every frame. The "max
 # text width" fractions cap how much of the frame the timestamp/caption
-# block is allowed to occupy: landscape footage gets the middle third
+
 # (text stays a tidy band centered in the frame, doesn't compete with the
-# camera image), portrait/square footage keeps the historical 80% (a third
-# of an already-narrow frame would be unreadably small). The bottom margin
+
+
 # is the gap between the BOTTOM-MOST text line's baseline and the floor of
-# the frame -- preserved whether the bottom line is the timestamp (no
-# caption) or the caption (timestamp moves up to keep this invariant).
+
+
 LANDSCAPE_MAX_TEXT_WIDTH_FRACTION = 1 / 3
 DEFAULT_MAX_TEXT_WIDTH_FRACTION = 0.8
 BOTTOM_MARGIN_FRACTION = 0.10
@@ -258,10 +258,10 @@ def fit_to_screen(frame, window_name, screen_width, screen_height):
     """Resize a frame to fit within the screen dimensions."""
     original_height, original_width = frame.shape[:2]
 
-    # Determine scaling factor to fit frame within screen dimensions
+    
     scale_width = screen_width / original_width
     scale_height = screen_height / original_height
-    scale = min(scale_width, scale_height)  # Use the smaller scale factor
+    scale = min(scale_width, scale_height)  
 
     resized_width = int(original_width * scale)
     resized_height = int(original_height * scale)
@@ -309,36 +309,36 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     """
     reporter = get_reporter()
 
-    # Create a window to get screen dimensions
+    
     window_name = "Select ROI"
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     temp_width, temp_height = (960, 540)
-    cv2.resizeWindow(window_name, temp_width, temp_height)  # Temporary window size
+    cv2.resizeWindow(window_name, temp_width, temp_height)  
 
-    # Resize frame to fit screen dimensions
+    
     resized_frame, scale = fit_to_screen(frame, window_name, temp_width, temp_height)
 
     instructions = "Click and drag to select desired region, then press Enter."
 
-    # Replace 'first_frame' with frame with instructions
+    
     frame_with_text = resized_frame.copy()
     text_size = cv2.getTextSize(instructions, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
     text_x = (frame_with_text.shape[1] - text_size[0]) // 2
-    text_y = 30  # Position at the top of the frame
+    text_y = 30  
     cv2.putText(frame_with_text, instructions, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-    # Show the resized frame and allow ROI selection
+    
     roi = cv2.selectROI(window_name, frame_with_text, showCrosshair=True, fromCenter=False)
-    cv2.destroyAllWindows()  # Close the ROI selection window
-    # On macOS the window is only actually torn down once the GUI event loop
-    # is pumped. Without this the leftover window beachballs whenever the main
+    cv2.destroyAllWindows()  
+    
+    
     # thread next blocks (e.g. the crop subcommand's input() prompt), since
-    # nothing is servicing its events. A few waitKey ticks flush the teardown.
+    
     for _ in range(5):
         cv2.waitKey(1)
 
-    # Scale ROI coordinates back to original resolution
+    
     x, y, w, h = map(int, roi)
     x = int(x / scale)
     y = int(y / scale)
@@ -346,25 +346,25 @@ def select_crop(frame) -> tuple[tuple[int, int], tuple[int, int]]:
     h = int(h / scale)
 
     coords = ((x, y), (w, h))
-    # Render the same value in TOML array syntax so users can paste it
-    # straight into either [settings].default_crop_dimensions or a
-    # [<server>.<alias>].crop_dimensions entry.
+    
+    
+    
     toml_coords = f"[[{x}, {y}], [{w}, {h}]]"
 
-    # Auto-copy the per-camera crop_dimensions line so the common path
-    # (paste into [<server>.<alias>]) is a single cmd-V away.
+    
+    
     clip_line = f"crop_dimensions = {toml_coords}"
     copied_suffix = "   (copied to clipboard)" if _copy_to_clipboard(clip_line) else ""
 
-    # Pad the labels to a common width so the values (everything after the
-    # "= ") line up vertically on their first character despite the differing
-    # label lengths.
+    
+    
+    
     label_settings = "Under [settings]: default_crop_dimensions"
     label_camera = "Under [<server>.<alias>]: crop_dimensions"
     label_width = max(len(label_settings), len(label_camera))
 
-    # Leading/trailing newlines frame the result so it stands out from the
-    # ROI-window teardown noise; the future-use block ends with a blank line.
+    
+    
     reporter.info(f"\nCrop coordinates selected: {coords}\n", crop_dimensions=coords)
     reporter.info(
         "For future use, copy one of these lines into your config file:\n"
@@ -400,7 +400,7 @@ def _write_crop_to_config(
         return False, f"Could not read {path.name}: {e}"
 
     lines = original.splitlines(keepends=True)
-    # The alias is a TOML key; it may appear bare or quoted in the header.
+    
     candidate_headers = {
         f"[{server}.{camera_alias}]",
         f'[{server}."{camera_alias}"]',
@@ -415,7 +415,7 @@ def _write_crop_to_config(
             f"{path.name}; left it unchanged (the line is on your clipboard to paste)."
         )
 
-    # The section runs until the next table header or end of file.
+    
     section_end = len(lines)
     for j in range(header_idx + 1, len(lines)):
         if lines[j].lstrip().startswith('['):
@@ -436,8 +436,8 @@ def _write_crop_to_config(
     if existing_idx is not None:
         lines[existing_idx] = new_line
     else:
-        # Guard against a missing trailing newline on the line we insert after
-        # (e.g. the section is the last thing in the file with no final \n).
+        
+        
         if lines[last_kv_idx] and not lines[last_kv_idx].endswith('\n'):
             lines[last_kv_idx] = lines[last_kv_idx] + '\n'
         lines.insert(last_kv_idx + 1, new_line)
@@ -482,25 +482,25 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     reporter = get_reporter()
 
     def calculate_font_scale(video_width: int, video_height: int, caption: Optional[str]) -> float:
-        # Static timestamp string: the format is fixed-width so its rendered
-        # width never changes frame-to-frame.
+        
+        
         timestamp_string = datetime(2025, 3, 28, 6, 43, 20).strftime('%Y-%m-%d %H:%M:%S')
 
-        # Landscape footage (width > height) caps to the middle third so
+        
         # the overlay doesn't dominate wide frames; portrait/square keeps
-        # the historical 80% cap.
+        
         is_landscape = video_width > video_height
         fraction = (LANDSCAPE_MAX_TEXT_WIDTH_FRACTION if is_landscape
                     else DEFAULT_MAX_TEXT_WIDTH_FRACTION)
         max_text_width = int(video_width * fraction)
 
-        # Pick a font scale that fits whichever line (timestamp or caption)
-        # is widest at scale=1. The caption is rendered at 0.8x the
+        
+        
         # timestamp's scale (preserved from the historical 0.8 ratio so a
-        # plain timestamp looks identical to before -- the cap binds the
-        # output, the ratio governs visual hierarchy), so its effective
-        # width at the chosen scale is `caption_w_at_1 * scale * 0.8`.
-        # Comparing widths AT SCALE=1 lets us solve for `scale` in one step.
+        
+        
+        
+        
         ts_w_at_1 = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, 1, settings.font_weight)[0][0]
         widest_at_1 = ts_w_at_1
         if caption:
@@ -519,15 +519,15 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     ) -> tuple[int, int]:
         text_size = cv2.getTextSize(timestamp_string, cv2.FONT_HERSHEY_SIMPLEX, font_scale, settings.font_weight)[0]
         text_width, _ = text_size
-        x_position = (video_width - text_width) // 2  # Center horizontally
+        x_position = (video_width - text_width) // 2  
 
         # Anchor the BOTTOM-MOST text line's baseline at a fixed margin
         # above the floor. Without a caption that's the timestamp itself
-        # (identical to the legacy behavior). With a caption, the caption
-        # sits below the timestamp by exactly `caption_y_offset`, so the
+        
+        
         # timestamp moves up by that offset -- which keeps the caption's
-        # baseline at the same 10% margin and prevents the bleed-off-the-
-        # bottom symptom that motivated this change.
+        
+        
         bottom_anchor_y = int(video_height * (1 - BOTTOM_MARGIN_FRACTION))
         y_position = bottom_anchor_y - (caption_y_offset or 0)
 
@@ -536,16 +536,16 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     
     multiplier = settings.timelapse_multiplier
 
-    # Ensure the input file has the correct extension
+    
     if not original_video_path.endswith('.mp4'):
         original_video_path = original_video_path + '.mp4'
 
-    # Multiplier must be a positive integer; this is the final guard after
-    # Settings has already applied its arg/config/default priority.
+    
+    
     if multiplier <= 0 or not isinstance(multiplier, int):
         raise TypeError("Timelapse multiplier must be a positive integer.")
 
-    # If not specified, rename the output file to the same as input with speed appended to it (e.g. video_4x.mp4)
+    
     if output_video_path is None:
         output_video_path=f'_{multiplier}x.'.join(original_video_path.split('.'))
 
@@ -565,14 +565,14 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         exit(1)
     height, width = frame.shape[:2]
 
-    # Handle cropping setup
+    
     if settings.crop:
         if settings.crop_dimensions is None:
             settings.crop_dimensions = select_crop(frame)
 
         (x, y), (crop_width, crop_height) = settings.crop_dimensions
 
-        # Validate crop dimensions
+        
         if x + crop_width > width or y + crop_height > height:
             reporter.warning(
                 f"Crop dimensions ({x}, {y}, {crop_width}, {crop_height}) "
@@ -592,8 +592,8 @@ def process_video(original_video_path: str, output_video_path: str = None, times
     font_scale = calculate_font_scale(crop_width, crop_height, settings.caption)
 
     # Pre-compute caption layout once. The caption text and font scale don't
-    # change frame-to-frame, so measuring inside the render loop would be
-    # wasteful. We anchor the caption directly below the timestamp using a
+    
+    
     # natural single-line leading (~25% of the timestamp's text height).
     caption_font_scale = font_scale * 0.8 if settings.caption else None
     caption_x = None
@@ -605,9 +605,9 @@ def process_video(original_video_path: str, output_video_path: str = None, times
             caption_font_scale,
             settings.font_weight,
         )
-        # Use a representative timestamp string to derive the line gap. Real
-        # per-frame timestamps differ only in their digit values so their
-        # vertical metrics are stable.
+        
+        
+        
         sample_ts = datetime(2025, 1, 1, 12, 0, 0).strftime('%Y-%m-%d %H:%M:%S')
         (_, sample_ts_h), sample_ts_baseline = cv2.getTextSize(
             sample_ts,
@@ -627,7 +627,7 @@ def process_video(original_video_path: str, output_video_path: str = None, times
         output=output_video_path,
         total_frames=total_frames,
     )
-    # Use crop dimensions for output video
+    
     writer = cv2.VideoWriter(output_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (crop_width, crop_height))
     count = 0
 
@@ -644,9 +644,9 @@ def process_video(original_video_path: str, output_video_path: str = None, times
 
         if timestamps:
             frame_position = vid.get(cv2.CAP_PROP_POS_FRAMES)
-            # Some containers report an unreliable frame count (0 or negative)
-            # even when frames decode fine; fall back to the running count so
-            # the mapping never divides by zero, and clamp the resulting index
+            
+            
+            
             # so a slightly-off frame count can't index past the timestamps.
             denominator = total_frames if total_frames > 0 else max(count + 1, 1)
             ts_index = int(frame_position / denominator * (number_of_timestamps - 1))
@@ -699,13 +699,13 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
         ValueError: If the quality is not 'low', 'medium', or 'high'.
     """
 
-    # Ensure the input file has the correct extension
+    
     if not original_video_path.endswith('.mp4'):
         original_video_path += '.mp4'
 
     quality = settings.compression_level
 
-    # If not specified, rename the output file to the same as input with codec and bitrate appended to it (e.g. video_libx264_500K.mp4)
+    
     if compressed_video_path is None:
         compressed_video_path = f'_{codec}_{quality}.'.join(original_video_path.split('.'))
 
@@ -722,14 +722,14 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
         raise ValueError("Compression quality must be one of: 'low', 'medium', 'high'")
 
     if settings.crop:
-        resolution = settings.crop_dimensions[1] # crop_dimensions[1] gives (width,height)
+        resolution = settings.crop_dimensions[1] 
 
     reporter = get_reporter()
     reporter.stage("compression", "Compressing video", output=compressed_video_path)
 
     with VideoFileClip(original_video_path, target_resolution=resolution) as video:
         # Funnel MoviePy's proglog progress into our reporter so it drives a
-        # single, real per-frame compression progress bar (and JSON events).
+        
         video.write_videofile(
             compressed_video_path,
             bitrate=bitrate,
@@ -778,7 +778,7 @@ def parse_arguments():
 
     arg_parser = argparse.ArgumentParser()
 
-    # Global progress-tracking options apply to every subcommand.
+    
     arg_parser.add_argument(
         '--progress-format',
         choices=['auto', 'human', 'json'],
@@ -796,16 +796,16 @@ def parse_arguments():
 
     subparsers = arg_parser.add_subparsers(dest='command', required=True)
 
-    # Extract mode subcommand
+    
     extract_parser = subparsers.add_parser('extract', help='Extract, timelapse, and compress a video file')
     extract_parser.add_argument('camera_alias', type=str, help='Name of camera wanted (required)')
     extract_parser.add_argument('date', nargs='?', default=None, type=str, help='Date of the requested video. If the footage spans past midnight, provide the date on which the footage starts. (e.g. 3/11)')
     extract_parser.add_argument('start', nargs='?', default=None, type=str, help='Starting timestamp of video requested (e.g. 11am)')
     extract_parser.add_argument('end', nargs='?', default=None, type=str, help='Ending timestamp of video requested (e.g. 5pm)')
-    # `config_file` is `nargs='?'` so callers can use the equivalent `--config`
-    # flag instead -- handy for programmatic callers (the web service) that
+    
+    
     # don't want to compose 5 positionals in the right order. main() validates
-    # that exactly one of the two sources is set.
+    
     extract_parser.add_argument('config_file', nargs='?', default=None, type=str, help='Filepath of local TOML config file (or use --config)')
     extract_parser.add_argument(
         '--config',
@@ -817,15 +817,15 @@ def parse_arguments():
             'positional config_file; one of the two must be set.'
         ),
     )
-    # ISO 8601 flag pair (e.g. 2026-05-27T09:30:00 or with offset/TZ).
-    # When both are given, they take precedence over the positional
-    # date/start/end form and skip the year/day fixup heuristics in
-    # `convert_input_to_datetime`. Programmatic callers (the web service)
-    # use these so the timestamp travels unambiguously instead of being
-    # round-tripped through a lossy `%m/%d` + `%I:%M%p` representation.
-    # The "iso" in the flag name is deliberate -- it makes the expected
-    # format obvious at the call site and distinguishes these from the
-    # human-friendly positional `date` / `start` / `end` arguments.
+    
+    
+    
+    
+    
+    
+    
+    
+    
     extract_parser.add_argument(
         '--start-iso-datetime',
         type=str,
@@ -881,13 +881,13 @@ def parse_arguments():
     extract_parser.add_argument('-c', '--crop', type=_parse_bool_flag, default=None, metavar='{true,false}', help='Crop the video (true/false). When unset, defers to [settings].default_crop in the config. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     extract_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
-    # Compress subcommand
+    
     compress_parser = subparsers.add_parser('compress', help='Compress a video file')
     compress_parser.add_argument('video_filename', type=str, help='Video file to compress')
     compress_parser.add_argument('quality', default=None, type=str, choices=['low', 'medium', 'high'], help='Desired compression quality')
     compress_parser.add_argument('-o', '--output_name', type=str, help='Desired filepath')
 
-    # Timelapse subcommand
+    
     timelapse_parser = subparsers.add_parser('timelapse', help='Create a timelapse video')
     timelapse_parser.add_argument('video_filename', type=str, help='Video file for timelapse')
     timelapse_parser.add_argument('multiplier', default=None, type=int, help='Desired timelapse multiplier (must be a positive integer)')
@@ -895,11 +895,11 @@ def parse_arguments():
     timelapse_parser.add_argument('-c', '--crop', type=_parse_bool_flag, default=None, metavar='{true,false}', help='Crop the video (true/false). When unset, defers to [settings].default_crop in the config. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     timelapse_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')
 
-    # Crop subcommand: grab a recent frame from a camera and open the
-    # interactive ROI selector to capture crop dimensions, without running
-    # any extract/timelapse/compress steps. CLI-only utility for quickly
+    
+    
+    
     # populating per-camera crop_dimensions in the config. Mirrors extract's
-    # config/credentials/server resolution.
+    
     crop_parser = subparsers.add_parser(
         'crop',
         help='Grab a recent frame and pick crop dimensions for a camera (CLI-only).',
@@ -932,12 +932,12 @@ def parse_arguments():
 
 
 EXACQMAN_METADATA_VERSION = 1
-# Schema version for the JSON payload stored in the mp4 `comment` tag.
-# Bump when the on-disk shape changes in a way that downstream readers
+
+
 # (e.g. exacqman-web's FileService) must be aware of. Readers should
-# accept any version <= the latest they understand; missing keys are
-# fine, extra keys are fine, version mismatches should be logged and
-# the payload treated as best-effort.
+
+
+
 
 
 def _locate_ffmpeg() -> Optional[str]:
@@ -1012,22 +1012,22 @@ def _embed_extract_metadata(file_path: Path, metadata: Dict[str, Any]) -> None:
         payload[key] = value
     json_blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
-    # Write to a sibling temp file then atomically swap. Writing in place
+    
     # isn't supported by ffmpeg (it would truncate the input mid-read);
-    # the temp + replace pattern handles that and gives us a clean rollback
-    # path on failure. Keep the `.mp4` suffix on the temp name so ffmpeg
-    # can infer the output muxer from the extension (using `.tmp` makes
-    # ffmpeg refuse with "Unable to choose an output format"); `-f mp4`
-    # is set explicitly too for belt-and-suspenders.
+    
+    
+    
+    
+    
     tmp_path = file_path.with_name(file_path.stem + ".tagging.mp4")
     args = [
         ffmpeg_bin,
-        "-y",                       # overwrite tmp if it exists
-        "-loglevel", "error",       # silence the per-frame chatter; surface real errors
+        "-y",                       
+        "-loglevel", "error",       
         "-i", str(file_path),
-        "-map", "0",                # carry every stream over (video, audio if any)
-        "-codec", "copy",           # no re-encode -- pure container rewrite
-        "-f", "mp4",                # force the output muxer regardless of temp name
+        "-map", "0",                
+        "-codec", "copy",           
+        "-f", "mp4",                
         "-metadata", f"comment={json_blob}",
         "-metadata", f"title={file_path.stem}",
         str(tmp_path),
@@ -1094,7 +1094,7 @@ def _finalize_extract_output_dir(
     """
     raw = output_dir / f"{output_stem}.mp4"
     timelapsed = output_dir / f"{output_stem}_{multiplier}x.mp4"
-    deliverable = output_dir / f"{output_stem}.mp4"  # same path as `raw`; raw must be deleted first
+    deliverable = output_dir / f"{output_stem}.mp4"  
 
     reporter = get_reporter()
     for path in (raw, timelapsed):
@@ -1106,10 +1106,10 @@ def _finalize_extract_output_dir(
                 f"Failed to remove intermediate {path}: {exc}",
             )
 
-    # `Path.replace` is the cross-platform atomic-on-same-filesystem
-    # rename; it overwrites the destination if it somehow still exists
-    # (we just deleted `raw`, which IS the destination, so the slot
-    # should be empty -- but defensive code never hurts here).
+    
+    
+    
+    
     compressed_path.replace(deliverable)
     return str(deliverable)
 
@@ -1133,9 +1133,9 @@ def _date_string_has_year(date: str) -> bool:
         with_low = duparse(date, default=datetime(2000, 1, 1))
         with_high = duparse(date, default=datetime(2100, 1, 1))
     except (ValueError, OverflowError, TypeError):
-        # Malformed input gets re-parsed (and erred) by the main path
-        # in `convert_input_to_datetime`; here we just fall back to
-        # "no explicit year" so the heuristic stays conservative.
+        
+        
+        
         return False
     return with_low.year == with_high.year
 
@@ -1172,7 +1172,7 @@ def convert_input_to_datetime(date: str, start: str, end: str) -> tuple[datetime
         # Year was inferred from "current year" and we're aimed at the
         # future -- shift back so the user's "5/27" means "the most
         # recent past 5/27". An explicit year ("5/27/26") bypasses this
-        # so future-dated extracts stay future-dated.
+        
         start_datetime = start_datetime - relativedelta(years=1)
         end_datetime = end_datetime - relativedelta(years=1)
 
@@ -1199,18 +1199,18 @@ def main():
 
     args = parse_arguments()
 
-    # Initialize the global progress reporter as early as possible so any
-    # downstream code path (including config errors) can use it.
+    
+    
     reporter = init_reporter(format=args.progress_format, quiet=args.quiet)
 
     config = None
 
-    # Resolve the config file from either the positional `config_file` or the
-    # equivalent `--config` flag. The flag form exists so programmatic callers
-    # (the web service) can compose a command using flags only, without having
-    # to fill in placeholder positionals for date/start/end. Humans typing the
-    # canonical 5-positional form still hit the positional slot directly.
-    # When both are given they must agree; mismatched values are a usage error.
+    
+    
+    
+    
+    
+    
     positional_config = getattr(args, 'config_file', None)
     flag_config = getattr(args, 'config_flag', None)
     if positional_config and flag_config and positional_config != flag_config:
@@ -1224,8 +1224,8 @@ def main():
         )
         exit(1)
     config_file = positional_config or flag_config
-    # Mirror the resolved value back onto args so the rest of main() sees a
-    # consistent `args.config_file` regardless of which form the caller used.
+    
+    
     args.config_file = config_file
     auth = None
     if config_file:
@@ -1243,8 +1243,8 @@ def main():
         else Settings.from_args_and_config(args)
     )
 
-    # Enforce caption length on the effective post-merge value so the rule
-    # applies uniformly regardless of source (CLI --caption or [settings] caption).
+    
+    
     if settings.caption and len(settings.caption) > Settings.caption_limit:
         reporter.error(
             "CaptionTooLong",
@@ -1257,9 +1257,9 @@ def main():
 
     try:
         if args.command == 'extract':
-            # extract needs a config: servers, cameras, timezone, and the
-            # credentials path all live there. Fail clearly before anything
-            # tries to read settings.timezone (ZoneInfo(None) would crash).
+            
+            
+            
             if not config:
                 reporter.error(
                     "ConfigError",
@@ -1268,7 +1268,7 @@ def main():
                 exit(1)
 
             # Resolve server/camera up front so a missing or typo'd value
-            # fails fast with a clear message before any network I/O.
+            
             if not settings.server:
                 reporter.error(
                     "ConfigError",
@@ -1293,23 +1293,23 @@ def main():
 
             timezone = ZoneInfo(settings.timezone)
 
-            # Two ways to specify the time range:
-            #   1. ISO 8601 flags (--start-iso-datetime / --end-iso-datetime)
-            #      -- the programmatic form. Unambiguous: no year/day
-            #      fixups, full precision down to seconds, optional
-            #      timezone offset.
-            #   2. Positional date + start + end -- the human form. Goes
-            #      through `convert_input_to_datetime`, which infers the year
+            
+            
+            
+            
+            
+            
+            
             #      only when the user didn't supply one (e.g. "5/27" without a
-            #      year defaults to "the most recent past 5/27") and rolls
-            #      the end date forward if it lands before the start.
-            # Precedence: ISO flags > positional CLI args. Mixing the two on
-            # the same command is a usage error (two conflicting intents).
+            
+            
+            
+            
             iso_start = settings.start_iso_datetime
             iso_end = settings.end_iso_datetime
             has_iso = bool(iso_start or iso_end)
-            # Check the *raw args namespace* (what the user typed on this
-            # invocation) rather than the merged `settings`, so config-file
+            
+            
             # values don't trip the mixing guard.
             has_positional_cli_time = bool(
                 getattr(args, 'date', None)
@@ -1373,15 +1373,15 @@ def main():
                     exit(1)
 
             # If the user didn't pass -o, build the canonical default output
-            # stem from the same shared helper the web service uses. Without
-            # this the exacqvision server picks the filename via
+            
+            
             # Content-Disposition, which is unpredictable and doesn't sort by
-            # date the way our convention does.
-            #
-            # Mutating settings here (rather than threading a local
-            # through) keeps the rest of the extract pipeline -- which
-            # already reads settings.output_filename in multiple places
-            # -- working without modification.
+            
+            
+            
+            
+            
+            
             if not settings.output_filename:
                 settings.output_filename = default_output_stem(
                     start,
@@ -1390,27 +1390,27 @@ def main():
                     settings.timelapse_multiplier,
                 )
 
-            # Normalize --output-dir into an absolute Path. Resolving early
-            # means subsequent path math (the intermediate cleanup at the
-            # end of the pipeline) works regardless of whether the caller
-            # passed a relative or absolute argument, or whether the CWD
-            # changes mid-run for any reason.
+            
+            
+            
+            
+            
             extract_output_dir: "Path | None" = None
             if settings.output_dir:
                 extract_output_dir = Path(settings.output_dir).resolve()
                 extract_output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Instantiate api class and retrieve video. The constructor logs
-            # in, so keep it inside the try where connection/auth failures are
-            # reported cleanly instead of surfacing as a raw traceback.
+            
+            
+            
             exapi = None
             try:
                 exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
-                # When `extract_output_dir` is set, the raw download lands
-                # in that directory; `process_video` and `compress_video`
-                # both default to writing next to their input, so the
-                # whole pipeline naturally flows into the same directory
-                # without any further threading.
+                
+                
+                
+                
+                
                 extracted_video_name = exapi.get_video(
                     settings.camera_id,
                     start,
@@ -1418,10 +1418,10 @@ def main():
                     video_filename=settings.output_filename,
                     output_dir=extract_output_dir,
                 )
-                # The auth token can expire during a long download, so we
-                # re-authenticate with a fresh client for the timestamp
-                # query. Close the first session before swapping the
-                # reference so it is never leaked.
+                
+                
+                
+                
                 try:
                     exapi.logout()
                 except Exception:
@@ -1440,8 +1440,8 @@ def main():
                 exit(1)
             finally:
                 # Guarded so a logout network error can't mask the real
-                # outcome (including the exit(1) above). `exapi` may still be
-                # None if the very first login failed.
+                
+                
                 if exapi is not None:
                     try:
                         exapi.logout()
@@ -1451,14 +1451,14 @@ def main():
             processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
             final_path = compress_video(processed_video_path)
 
-            # When --output-dir is set, collapse the three pipeline files
-            # down to a single deliverable: delete the raw download and
-            # the timelapsed intermediate, then rename the compressed
-            # file to a bare `{stem}.mp4`. This is the programmatic-
-            # delivery contract -- the web service relies on this so it
-            # can spawn the CLI with --output-dir=<exports/> and treat
-            # the resulting file as the finished artifact, with no
-            # follow-up move/cleanup work.
+            
+            
+            
+            
+            
+            
+            
+            
             if extract_output_dir is not None:
                 final_path = _finalize_extract_output_dir(
                     extract_output_dir,
@@ -1467,13 +1467,13 @@ def main():
                     compressed_path=Path(final_path),
                 )
 
-            # Embed provenance metadata into the final mp4 so the camera
-            # alias, server, time range, multiplier, and caption travel
-            # with the file even if the config file is later renamed or
-            # rewritten. The web service reads this back to populate the
+            
+            
+            
+            
             # file-browser's "Camera" column, replacing the brittle
-            # filename-parsing fallback. Done as a final step, AFTER any
-            # rename, so the metadata lands in the user-facing file.
+            
+            
             _embed_extract_metadata(
                 Path(final_path),
                 {
@@ -1491,13 +1491,13 @@ def main():
             reporter.done(output=final_path)
 
         elif args.command == 'crop':
-            # Standalone crop-dimension capture: pull a short recent clip,
-            # open the ROI selector on its first frame, print the chosen
-            # dimensions. No timelapse / compress / metadata / output file.
+            
+            
+            
 
-            # Pre-flight resolution checks -- fail fast with a clear message
-            # before any network I/O, reusing the same error taxonomy as
-            # extract. `Settings` resolves server/camera from CLI args.
+            
+            
+            
             if not settings.server:
                 reporter.error(
                     "ConfigError",
@@ -1524,9 +1524,9 @@ def main():
             lookback_arg = getattr(args, 'lookback_minutes', 15)
             lookback = lookback_arg if lookback_arg and lookback_arg > 0 else 15
 
-            # End at "now", look back a modest window for *recorded footage*.
-            # We only need one frame; the camera framing is static, so any
-            # recent frame works.
+            
+            
+            
             end = datetime.now()
             start = end - timedelta(minutes=lookback)
 
@@ -1536,13 +1536,13 @@ def main():
             )
 
             # Probe clip lives in a project-local scratch dir that's cleaned
-            # automatically -- never the system temp dir, so nothing lands
-            # outside the project. It exists only to hand one frame to the selector.
+            
+            
             TEMP_DIR.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="exacqman_crop_", dir=TEMP_DIR) as tmp_dir:
-                # Construct inside the try so a login/connection failure
-                # surfaces as the same friendly ExacqvisionError message
-                # (the Exacqvision constructor logs in eagerly). RequestException
+                
+                
+                
                 # covers a server that's unreachable or refusing connections.
                 exapi = None
                 try:
@@ -1550,10 +1550,10 @@ def main():
                         settings.server_ip, settings.username, settings.password, timezone
                     )
 
-                    # Search the window for seconds that actually have footage,
-                    # then export just a ~2s slice around the most recent one.
-                    # Exporting the entire lookback window would download
-                    # minutes (often gigabytes) of video to read a single frame.
+                    
+                    
+                    
+                    
                     try:
                         footage_seconds = exapi.get_timestamps(
                             settings.camera_id, start, end
@@ -1561,8 +1561,8 @@ def main():
                     except (ExacqvisionError, RequestException):
                         raise
                     except Exception:
-                        # No videoInfo/clips in the response, etc. -- treat as
-                        # "no footage" rather than leaking a parse traceback.
+                        
+                        
                         footage_seconds = []
 
                     if not footage_seconds:
@@ -1617,24 +1617,24 @@ def main():
                     )
                     exit(1)
 
-                # The download is done, but the crop path has no following
-                # stage to retire its progress bar (unlike extract). Close it
-                # now so its leave=False line is cleared -- otherwise the open
-                # bar refreshes under every later print and sits on top of the
-                # input() prompt, which reads as a frozen "re-download".
+                
+                
+                
+                
+                
                 reporter.close()
 
                 coords = select_crop(frame)
 
-            # No reporter.done() here: select_crop already prints the result
-            # block, and a trailing "Done." line would be noise for this
-            # interactive utility.
+            
+            
+            
 
-            # Offer to write the selection straight into the config. Only when
-            # we have a real interactive terminal -- in piped/JSON contexts an
-            # input() prompt would hang, and the clipboard/print already covers
-            # the manual path. The prompt follows the blank line that closes the
-            # "for future use" block above.
+            
+            
+            
+            
+            
             if sys.stdin.isatty():
                 (cx, cy), (cw, ch) = coords
                 toml_coords = f"[[{cx}, {cy}], [{cw}, {ch}]]"
@@ -1661,7 +1661,7 @@ def main():
             reporter.done(output=final_path)
 
     except SystemExit:
-        # exit() was called intentionally; let it propagate without an extra error event.
+        
         raise
     except Exception as e:
         reporter.error(type(e).__name__, str(e))
