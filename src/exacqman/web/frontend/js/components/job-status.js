@@ -152,8 +152,15 @@ class JobStatus {
             meta.push(`Speed: ${req.timelapse_multiplier}x`);
         }
         if (req.start_datetime && req.end_datetime) {
-            const duration = new Date(req.end_datetime) - new Date(req.start_datetime);
-            meta.push(`Duration: ${this.formatDuration(duration)}`);
+            const footageDuration = new Date(req.end_datetime) - new Date(req.start_datetime);
+            meta.push(`Footage Duration: ${this.formatDuration(footageDuration)}`);
+
+            // The timelapse output runs at footage / speed; only derivable when
+            // we have a positive multiplier to divide by.
+            const multiplier = Number(req.timelapse_multiplier);
+            if (multiplier > 0) {
+                meta.push(`Timelapse Duration: ${this.formatDuration(footageDuration / multiplier)}`);
+            }
         }
         // The raw error is intentionally not surfaced here -- the friendly
         // status message and the downloadable log together replace it.
