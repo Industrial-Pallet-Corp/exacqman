@@ -115,6 +115,13 @@ body {
     gap: var(--spacing-4);
 }
 
+/* Subtle build version, right-aligned in the header bar. */
+.app-version {
+    font-size: var(--font-size-sm);
+    color: rgba(255, 255, 255, 0.65);
+    white-space: nowrap;
+}
+
 .company-logo {
     display: flex;
     align-items: center;

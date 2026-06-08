@@ -12,6 +12,7 @@ import logging
 from datetime import datetime
 import os
 
+from exacqman import __version__
 from exacqman.web.api.models import (
     ExtractRequest, CameraInfo, ConfigInfo, ConnectivityInfo,
     JobsSnapshot, FileInfo, ApiResponse,
@@ -173,6 +174,12 @@ async def download_video(filename: str):
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
+
+
+@router.get("/version")
+async def get_version() -> dict:
+    """Return the canonical project version for the UI badge."""
+    return {"version": __version__}
 
 
 @router.get("/configs", response_model=List[str])

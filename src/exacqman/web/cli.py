@@ -53,7 +53,7 @@ from pathlib import Path
 
 import uvicorn
 
-from exacqman import paths
+from exacqman import paths, __version__
 
 # Runtime state (the PID file) lives in the log dir resolved by exacqman.paths
 # (Homebrew ``var/log`` or the XDG state dir), the same directory the job queue
@@ -392,6 +392,9 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="exacqman-web",
         description="Start, stop, or check the ExacqMan Web server.",
+    )
+    parser.add_argument(
+        "--version", "-v", action="version", version=f"%(prog)s {__version__}",
     )
     subparsers = parser.add_subparsers(dest="command")
 

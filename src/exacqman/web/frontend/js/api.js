@@ -135,6 +135,14 @@ class ExacqManAPI {
         return await this.request(`/connectivity/${encodeURIComponent(configFile)}`);
     }
 
+    /**
+     * Fetch the canonical project version for the UI badge.
+     * @returns {Promise<Object>} {version: string}
+     */
+    async getVersion() {
+        return await this.request('/version');
+    }
+
     // Extraction workflow
 
     /**

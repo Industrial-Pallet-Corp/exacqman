@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from exacqman import paths
+from exacqman import paths, __version__
 from exacqman.web.api.routes import router, job_queue
 
 # Configure logging
@@ -34,7 +34,7 @@ FRONTEND_DIR = Path(importlib.resources.files("exacqman.web") / "frontend")
 app = FastAPI(
     title="ExacqMan Web API",
     description="Web interface for ExacqMan video processing tool",
-    version="1.0.0"
+    version=__version__
 )
 
 # Add CORS middleware for frontend communication
@@ -105,7 +105,7 @@ async def root():
     """Root endpoint with API information."""
     return {
         "message": "ExacqMan Web API",
-        "version": "1.0.0",
+        "version": __version__,
         "endpoints": {
             "extract": "/api/extract",
             "jobs": "/api/jobs",
