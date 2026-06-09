@@ -39,7 +39,12 @@ exacqman --help
 ```bash
 exacqman init                       # scaffold config + credentials into the standard config dir
 # edit the printed default.config (servers, cameras) and default.credentials (username/password)
+
+exacqman --help
 exacqman extract ch dock-10 5/30 9am 9:05am
+
+exacqman-web start            # run the local web UI in the foreground (http://localhost:8887)
+brew services start exacqman  # or run the web UI as a managed background service
 ```
 
 `exacqman init` copies the bundled templates into the [config directory](#configuration) and prints the exact paths plus next steps. The credentials file is written with `0600` permissions.
