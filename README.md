@@ -37,12 +37,12 @@ exacqman --help
 ## Quick start
 
 ```bash
-exacqman init                       # scaffold config + credentials into the standard config dir
-# edit the printed default.config (servers, cameras) and default.credentials (username/password)
+exacqman init                 # seed config + credentials into $(brew --prefix)/etc/exacqman
+exacqman --help               # CLI usage
 
-exacqman --help
-exacqman extract ch dock-10 5/30 9am 9:05am
+exacqman extract ch dock-10 5/30 9am 9:05am  # extract footage
 
+exacqman-web --help           # web server usage
 exacqman-web start            # run the local web UI in the foreground (http://localhost:8887)
 brew services start exacqman  # or run the web UI as a managed background service
 ```
