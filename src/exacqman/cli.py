@@ -1234,59 +1234,41 @@ def _ensure_output_dir(target_dir: Path, source: str) -> Path:
     exit(1)
 
 
-def _finalize_extract_output_dir(
+def _deliver_extract_output(
+    compressed_path: Path,
     output_dir: Path,
     output_stem: str,
-    compressed_path: Path,
-    raw_path: Path,
-    timelapsed_path: Path,
 ) -> str:
-    """Collapse the extract pipeline's outputs into one deliverable.
+    """Move the finished extract out of the tmp dir into ``output_dir``.
 
-    The extract pipeline produces three files:
+    The extract pipeline runs entirely inside a throwaway per-run tmp
+    directory (download -> timelapse -> compress -> tag), so the only
+    thing that should ever land in ``output_dir`` -- the exports dir the
+    web file browser lists -- is the single finished artifact. This moves
+    ``compressed_path`` to ``{output_dir}/{output_stem}.mp4`` (a clean,
+    codec-suffix-free name) and returns that path. The caller removes the
+    tmp directory afterwards, which disposes of the raw download and the
+    timelapsed intermediate in one shot.
 
-      1. the raw download        (``raw_path``)
-      2. the timelapsed clip     (``timelapsed_path``)
-      3. the final compressed clip (``compressed_path``)
-
-    This deletes (1) and (2), then renames (3) to
-    ``{output_dir}/{output_stem}.mp4`` so the directory contains exactly
-    one user-facing file -- the finished artifact -- with a clean
-    stem-based name and no codec suffix. Cleanup operates on the actual
-    intermediate paths (not names reconstructed from the stem), so it
-    stays correct even if the server's Content-Disposition name differs
-    slightly from our stem. The web service depends on this contract:
-    when it spawns the CLI with ``--output-dir=<exports/>``, the file it
-    finds at the reported ``done.output`` path is the only one left
-    behind.
-
-    Cleanup failures (unlink races, permission glitches) are logged as
-    warnings but don't fail the job -- the user already has the final
-    file, which is what matters.
+    ``shutil.move`` is used rather than ``Path.replace`` so the delivery
+    still works when the tmp dir and exports dir are on different
+    filesystems (a custom ``EXACQMAN_TMP_DIR`` override): it degrades to
+    a copy+remove instead of raising ``OSError`` on a cross-device rename.
+    On the same filesystem (the default, where the tmp dir is a sibling
+    of the exports dir) it's a fast atomic rename.
 
     Returns:
-        Absolute path to the renamed deliverable, as a string (matches
-        the type ``reporter.done(output=...)`` expects).
+        Absolute path to the delivered file, as a string (matches the
+        type ``reporter.done(output=...)`` expects).
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
     deliverable = output_dir / f"{output_stem}.mp4"
-
-    reporter = get_reporter()
-    for path in (raw_path, timelapsed_path):
-        # Never delete the deliverable slot itself: the compressed file is
-        # about to be moved there, and the raw download may already share
-        # that exact path (when the server named it {stem}.mp4). `replace`
-        # below overwrites it atomically.
-        try:
-            if path != deliverable and path.is_file():
-                path.unlink()
-        except OSError as exc:
-            reporter.warning(
-                f"Failed to remove intermediate {path}: {exc}",
-            )
-
-    # `Path.replace` is the cross-platform atomic-on-same-filesystem
-    # rename; it overwrites the destination if it still exists.
-    compressed_path.replace(deliverable)
+    # Move onto an existing destination must overwrite; shutil.move refuses
+    # to overwrite a file that already exists at the target, so clear it
+    # first (a re-run with the same stem is the common case).
+    if deliverable.exists():
+        deliverable.unlink()
+    shutil.move(str(compressed_path), str(deliverable))
     return str(deliverable)
 
 
@@ -1833,94 +1815,109 @@ def main():
                 )
                 exit(1)
 
-            # Instantiate api class and retrieve video. The constructor logs
-            # in, so keep it inside the try where connection/auth failures are
-            # reported cleanly instead of surfacing as a raw traceback.
-            exapi = None
+            # Run the whole pipeline (download -> timelapse -> compress ->
+            # tag) inside a throwaway per-run tmp directory rather than in
+            # the exports dir. Half-finished intermediates therefore never
+            # appear in the web file browser's "exported footage" list while
+            # a job is active; only the single finished file is moved into
+            # `extract_output_dir` on success. The tmp dir lives on the same
+            # filesystem as exports by default (a sibling), so that move is a
+            # fast rename. `mkdtemp` gives each run its own subdir so a CLI
+            # invocation and the background service can't collide.
+            tmp_subdir = Path(
+                tempfile.mkdtemp(prefix="extract_", dir=paths.ensure_dir(paths.tmp_dir()))
+            )
             try:
-                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
-                # The raw download lands in `extract_output_dir` (always
-                # set); `process_video` and `compress_video` both default
-                # to writing next to their input, so the whole pipeline
-                # naturally flows into the same directory without any
-                # further threading.
-                extracted_video_name = exapi.get_video(
-                    settings.camera_id,
-                    start,
-                    end,
-                    video_filename=settings.output_filename,
-                    output_dir=extract_output_dir,
-                )
-                # The auth token can expire during a long download, so we
-                # re-authenticate with a fresh client for the timestamp
-                # query. Close the first session before swapping the
-                # reference so it is never leaked.
+                # Instantiate api class and retrieve video. The constructor
+                # logs in, so keep it inside the try where connection/auth
+                # failures are reported cleanly instead of surfacing as a raw
+                # traceback.
+                exapi = None
                 try:
-                    exapi.logout()
-                except Exception:
-                    pass
-                exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
-                video_timestamps = exapi.get_timestamps(settings.camera_id, start, end)
-            except (ExacqvisionError, RequestException) as e:
-                reporter.error(
-                    "ExacqvisionError",
-                    (
-                        f"Failed to get video. Make sure selected camera: "
-                        f"{settings.camera_alias} is part of selected server: "
-                        f"{settings.server}. {e}"
-                    ),
-                )
-                exit(1)
-            finally:
-                # Guarded so a logout network error can't mask the real
-                # outcome (including the exit(1) above). `exapi` may still be
-                # None if the very first login failed.
-                if exapi is not None:
+                    exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
+                    # The raw download lands in the tmp dir; `process_video`
+                    # and `compress_video` both default to writing next to
+                    # their input, so the whole pipeline naturally flows
+                    # through the tmp dir without any further threading.
+                    extracted_video_name = exapi.get_video(
+                        settings.camera_id,
+                        start,
+                        end,
+                        video_filename=settings.output_filename,
+                        output_dir=tmp_subdir,
+                    )
+                    # The auth token can expire during a long download, so we
+                    # re-authenticate with a fresh client for the timestamp
+                    # query. Close the first session before swapping the
+                    # reference so it is never leaked.
                     try:
                         exapi.logout()
                     except Exception:
                         pass
+                    exapi = Exacqvision(settings.server_ip, settings.username, settings.password, timezone)
+                    video_timestamps = exapi.get_timestamps(settings.camera_id, start, end)
+                except (ExacqvisionError, RequestException) as e:
+                    reporter.error(
+                        "ExacqvisionError",
+                        (
+                            f"Failed to get video. Make sure selected camera: "
+                            f"{settings.camera_alias} is part of selected server: "
+                            f"{settings.server}. {e}"
+                        ),
+                    )
+                    exit(1)
+                finally:
+                    # Guarded so a logout network error can't mask the real
+                    # outcome (including the exit(1) above). `exapi` may still
+                    # be None if the very first login failed.
+                    if exapi is not None:
+                        try:
+                            exapi.logout()
+                        except Exception:
+                            pass
 
-            processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
-            final_path = compress_video(processed_video_path)
+                processed_video_path = process_video(extracted_video_name, timestamps=video_timestamps)
+                compressed_path = compress_video(processed_video_path)
 
-            # Collapse the three pipeline files down to a single
-            # deliverable: delete the raw download and the timelapsed
-            # intermediate, then rename the compressed file to a bare
-            # `{stem}.mp4` in the resolved output directory. This always
-            # runs now -- the CLI direct path and the web service
-            # (--output-dir=<exports/>) both end up with exactly one
-            # clean, codec-suffix-free artifact and no follow-up cleanup.
-            final_path = _finalize_extract_output_dir(
-                extract_output_dir,
-                output_stem=settings.output_filename,
-                compressed_path=Path(final_path),
-                raw_path=Path(extracted_video_name),
-                timelapsed_path=Path(processed_video_path),
-            )
+                # Embed provenance metadata into the mp4 so the camera alias,
+                # server, time range, multiplier, and caption travel with the
+                # file even if the config file is later renamed or rewritten.
+                # Done here -- on the compressed file, still in the tmp dir --
+                # so the transient `.tagging.mp4` ffmpeg writes never lands in
+                # the exports dir either.
+                _embed_extract_metadata(
+                    Path(compressed_path),
+                    {
+                        "server": settings.server,
+                        "camera_alias": settings.camera_alias,
+                        "camera_id": settings.camera_id,
+                        "multiplier": settings.timelapse_multiplier,
+                        "start_iso": start.isoformat(),
+                        "end_iso": end.isoformat(),
+                        "timezone": settings.timezone,
+                        "caption": settings.caption,
+                    },
+                )
 
-            # Embed provenance metadata into the final mp4 so the camera
-            # alias, server, time range, multiplier, and caption travel
-            # with the file even if the config file is later renamed or
-            # rewritten. The web service reads this back to populate the
-            # file-browser's "Camera" column, replacing the brittle
-            # filename-parsing fallback. Done as a final step, AFTER any
-            # rename, so the metadata lands in the user-facing file.
-            _embed_extract_metadata(
-                Path(final_path),
-                {
-                    "server": settings.server,
-                    "camera_alias": settings.camera_alias,
-                    "camera_id": settings.camera_id,
-                    "multiplier": settings.timelapse_multiplier,
-                    "start_iso": start.isoformat(),
-                    "end_iso": end.isoformat(),
-                    "timezone": settings.timezone,
-                    "caption": settings.caption,
-                },
-            )
+                # Move the one finished, tagged file into the resolved output
+                # directory with a clean `{stem}.mp4` name. The web service
+                # depends on this contract: when it spawns the CLI with
+                # `--output-dir=<exports/>`, the file at the reported
+                # `done.output` path is the only thing that ever appears there.
+                final_path = _deliver_extract_output(
+                    Path(compressed_path),
+                    extract_output_dir,
+                    settings.output_filename,
+                )
 
-            reporter.done(output=final_path)
+                reporter.done(output=final_path)
+            finally:
+                # Always dispose of the tmp dir -- on success it holds the
+                # now-moved-out raw download and timelapsed intermediate; on
+                # failure (or cancellation) it holds whatever got that far.
+                # `ignore_errors` keeps a cleanup glitch from masking the real
+                # job outcome.
+                shutil.rmtree(tmp_subdir, ignore_errors=True)
 
         elif args.command == 'crop':
             # Standalone crop-dimension capture: pull a short recent clip,

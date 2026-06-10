@@ -12,6 +12,7 @@ import uvicorn
 import asyncio
 import importlib.resources
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -70,10 +71,37 @@ app.mount("/exports", StaticFiles(directory=str(EXPORTS_DIR)), name="exports")
 # Mount frontend files (this should be LAST to catch all other routes)
 app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
+def _purge_orphan_tmp_dirs() -> None:
+    """Remove leftover per-run extract tmp directories at startup.
+
+    The CLI runs each extract in an ``extract_*`` subdir of the tmp dir
+    and removes it in a ``finally`` block, but a hard kill (SIGKILL of the
+    CLI's process group, a power loss) can leave one behind. At server
+    startup no job is running yet -- and the previous server's job
+    subprocesses are killed with it -- so any ``extract_*`` dir present is
+    definitively orphaned and safe to delete. Best-effort: a missing tmp
+    dir or an unlink glitch is logged, never fatal.
+    """
+    tmp_root = paths.tmp_dir()
+    try:
+        if not tmp_root.is_dir():
+            return
+        for entry in tmp_root.iterdir():
+            if entry.is_dir() and entry.name.startswith("extract_"):
+                shutil.rmtree(entry, ignore_errors=True)
+                logger.info("Removed orphaned tmp dir %s", entry)
+    except OSError as exc:
+        logger.warning("Failed to sweep tmp dir %s: %s", tmp_root, exc)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize the application on startup."""
     logger.info("Starting ExacqMan Web Server...")
+
+    # Clear any extract tmp dirs orphaned by a previous hard kill before
+    # accepting new jobs, so scratch space from crashed runs doesn't leak.
+    _purge_orphan_tmp_dirs()
 
     # Spin up the serial job worker. Subsequent /api/extract calls will
     # enqueue against this single instance, ensuring one-at-a-time

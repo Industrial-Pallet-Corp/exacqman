@@ -12,6 +12,14 @@ into its own tree:
     in the current working directory for interactive CLI / foreground web use;
     a backgrounded service points it elsewhere via ``EXACQMAN_EXPORTS_DIR`` (or
     an explicit override).
+  * ``tmp_dir()``     -- temporary scratch space for in-progress extract
+    intermediates (the raw download, the timelapsed clip, the compressed clip).
+    Kept deliberately *outside* the exports dir so half-finished files never
+    show up in the web file browser's "exported footage" list while a job is
+    running; only the finished, tagged file is moved into the exports dir on
+    success. Defaults to an ``exacqman-tmp`` sibling of the exports dir (same
+    filesystem, so the final move is a fast rename) and is overridable via
+    ``EXACQMAN_TMP_DIR``.
   * ``log_dir()``     -- server PID file, server log, and per-job logs. On
     Homebrew this is ``$(brew --prefix)/var/log``; otherwise the XDG state
     location ``~/.local/state/exacqman``.
@@ -29,6 +37,7 @@ from pathlib import Path
 # Environment overrides (highest precedence within each resolver).
 ENV_CONFIG_DIR = "EXACQMAN_CONFIG_DIR"
 ENV_EXPORTS_DIR = "EXACQMAN_EXPORTS_DIR"
+ENV_TMP_DIR = "EXACQMAN_TMP_DIR"
 ENV_LOG_DIR = "EXACQMAN_LOG_DIR"
 
 
@@ -95,6 +104,30 @@ def exports_dir(override: str | os.PathLike | None = None) -> Path:
     if env:
         return Path(env).expanduser()
     return Path.cwd() / "exports"
+
+
+def tmp_dir(override: str | os.PathLike | None = None) -> Path:
+    """Temporary scratch directory for in-progress extract intermediates.
+
+    An extract run downloads the raw clip, timelapses it, and compresses it
+    in a fresh per-run subdirectory of this location, then moves *only* the
+    finished, tagged file into the exports dir. Keeping the tmp dir separate
+    from the exports dir is what stops half-finished files from appearing in
+    the web file browser's "exported footage" list while a job is active.
+
+    Precedence: explicit ``override`` > ``EXACQMAN_TMP_DIR`` > an
+    ``exacqman-tmp`` sibling of the exports dir. The default deliberately
+    shares the exports dir's parent so the final move is a same-filesystem
+    rename rather than a copy; a managed service whose exports live at
+    ``<prefix>/var/exacqman/exports`` therefore works in
+    ``<prefix>/var/exacqman/exacqman-tmp``.
+    """
+    if override:
+        return Path(override).expanduser()
+    env = os.environ.get(ENV_TMP_DIR)
+    if env:
+        return Path(env).expanduser()
+    return exports_dir().parent / "exacqman-tmp"
 
 
 def log_dir() -> Path:

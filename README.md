@@ -111,6 +111,8 @@ id = 2
 
 Finished videos are written to **`./exports`** in the current working directory by default. Override per-run with `--output-dir <dir>`, or globally with the `EXACQMAN_EXPORTS_DIR` environment variable (used by the background service — see below). Output files are always `.mp4`.
 
+While a job runs, the intermediate files (the raw download, the timelapsed clip, the compressed clip) are written to a separate temporary location — an `exacqman-tmp` sibling of the exports dir by default, overridable with `EXACQMAN_TMP_DIR` — and only the single finished, tagged file is moved into the exports dir on success. This keeps half-finished files out of the exports listing (and the web file browser) while extraction is in progress.
+
 ## CLI usage
 
 Run `exacqman --help` (or `exacqman <command> --help`) for full options. Five commands:
@@ -219,6 +221,7 @@ The service runs the same foreground `exacqman-web start`, reads config from `et
 | --- | --- | --- | --- |
 | Config + credentials | `$(brew --prefix)/etc/exacqman` | `~/.config/exacqman` | `EXACQMAN_CONFIG_DIR` |
 | Exports | `./exports` (cwd) | `./exports` (cwd) | `EXACQMAN_EXPORTS_DIR` |
+| Tmp dir (in-progress intermediates) | `exacqman-tmp` sibling of exports | `exacqman-tmp` sibling of exports | `EXACQMAN_TMP_DIR` |
 | Logs + PID file | `$(brew --prefix)/var/log` | `~/.local/state/exacqman` | `EXACQMAN_LOG_DIR` |
 
 The installed package itself is read-only — nothing is ever written inside it. All locations resolve through `exacqman.paths`.
@@ -250,6 +253,8 @@ service do
   environment_variables EXACQMAN_EXPORTS_DIR: var/"exacqman/exports"
 end
 ```
+
+The in-progress tmp dir defaults to an `exacqman-tmp` sibling of the exports dir (`var/"exacqman/exacqman-tmp"` here — same filesystem, so delivering the finished file is a fast rename), so no extra `environment_variables` entry is required. Set `EXACQMAN_TMP_DIR` only if you want scratch space somewhere else.
 
 `exacqman-web start` is a clean foreground process (no self-daemonizing), exactly what `brew services` expects. The service reads config from `#{etc}/exacqman` automatically (no `--config` needed) because `exacqman.paths` detects the Homebrew prefix from the install location.
 
