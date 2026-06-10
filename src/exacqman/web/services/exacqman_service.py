@@ -288,11 +288,11 @@ class ExacqManService:
                         "This is a CLI integration regression."
                     )
 
-                # With `--output-dir` set, the CLI delivers the final
-                # file directly into `exports/` (renamed to the bare
-                # stem with no codec suffix, intermediates already
-                # removed by `_finalize_extract_output_dir` in the
-                # CLI). `done.output` is therefore already the
+                # With `--output-dir` set, the CLI runs the whole
+                # pipeline in a separate tmp dir and moves only the
+                # final file into `exports/` (renamed to the bare stem
+                # with no codec suffix; intermediates never touch the
+                # exports dir). `done.output` is therefore already the
                 # canonical artifact path; we just resolve it (it may
                 # be absolute or relative to the CLI's cwd) and pass
                 # it through.
