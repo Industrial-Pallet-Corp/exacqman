@@ -7,8 +7,8 @@ This package is bundled with ExacqMan and is **opt-in at runtime** — `brew ins
 ## Running
 
 ```bash
-exacqman-web start            # foreground on http://localhost:8887 (Ctrl-C to stop)
-exacqman-web start -p 9000    # custom port
+exacqman-web start            # foreground on the configured port (default 8887)
+exacqman-web start -p 9000    # custom port (overrides the config)
 exacqman-web start --host 0.0.0.0
 exacqman-web start --reload   # development auto-reload (watcher + worker)
 exacqman-web status
@@ -16,6 +16,7 @@ exacqman-web stop
 ```
 
 - `start` runs one foreground uvicorn process. The PID/host/port are recorded in a PID file under the log directory (`exacqman.paths.log_dir()`), so `stop`/`status` work from any terminal; if the PID file is missing/stale they fall back to discovering the listener on the port via `lsof`.
+- The port is resolved as `--port/-p` → `[settings].port` in `default.config` → the built-in `8887` default. `stop`/`status` use the same configured port when there's no PID file to read.
 - There is **no `--background` flag**. For unattended operation use the OS service manager (`brew services start exacqman`) — a clean foreground process is exactly what a supervisor expects. See the repo root [`README.md`](../../../README.md) for the formula `service` block.
 
 ## Layout
