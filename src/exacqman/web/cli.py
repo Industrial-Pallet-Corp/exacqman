@@ -48,12 +48,13 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
 
-from exacqman import paths, __version__
+from exacqman import paths, __version__, DEFAULT_WEB_PORT
 
 # Runtime state (the PID file) lives in the log dir resolved by exacqman.paths
 # (Homebrew ``var/log`` or the XDG state dir), the same directory the job queue
@@ -64,7 +65,10 @@ RUNTIME_DIR = paths.log_dir()
 PID_FILE = RUNTIME_DIR / "server.pid"
 
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 8887
+# Fallback port when neither `--port` nor `[settings].port` is set. The web UI
+# always operates on default.config, so that's where a configured port lives.
+DEFAULT_PORT = DEFAULT_WEB_PORT
+DEFAULT_CONFIG_NAME = "default.config"
 
 # How long `stop` waits for a graceful exit before escalating to SIGKILL.
 # Comfortably above the 8s `JobQueue.stop()` bound in the FastAPI lifespan so
@@ -75,6 +79,47 @@ STOP_GRACE_SECONDS = 15
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+def _default_config_path() -> Path | None:
+    """Locate the ``default.config`` the web UI operates on, or None.
+
+    Mirrors the lookup the rest of the app uses (config dir, then cwd, via
+    ``paths.iter_config_files``), falling back to the canonical config-dir
+    location. Returns None when no such file exists on disk.
+    """
+    for candidate in paths.iter_config_files():
+        if candidate.name == DEFAULT_CONFIG_NAME:
+            return candidate
+    fallback = paths.config_dir() / DEFAULT_CONFIG_NAME
+    return fallback if fallback.is_file() else None
+
+
+def _configured_port() -> int | None:
+    """Return ``[settings].port`` from default.config, or None.
+
+    None covers every "no usable value" case -- file missing, unreadable,
+    invalid TOML, key absent, or out-of-range -- so callers can cleanly fall
+    back to ``DEFAULT_PORT``. Parsed with the stdlib ``tomllib`` to keep this
+    module dependency-light.
+    """
+    path = _default_config_path()
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as fp:
+            data = tomllib.load(fp)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    port = (data.get("settings") or {}).get("port")
+    if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _resolve_default_port() -> int:
+    """Effective port when no ``--port`` is given: config value, else default."""
+    return _configured_port() or DEFAULT_PORT
+
 
 def _pid_alive(pid: int) -> bool:
     """Return True if a process with ``pid`` exists and is signalable.
@@ -224,7 +269,10 @@ def _signal_pid_group(pid: int, sig: int) -> bool:
 
 def cmd_start(args: argparse.Namespace) -> int:
     """Start the server in the foreground."""
-    host, port = args.host, args.port
+    # Precedence: explicit --port > [settings].port in default.config > builtin
+    # default. ``args.port`` is None unless the flag was passed.
+    host = args.host
+    port = args.port if args.port is not None else _resolve_default_port()
 
     # Already-running guard: a live PID file on the same port means there's a
     # server up; refuse rather than double-bind. A stale file (dead PID) is
@@ -280,7 +328,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
     pid: int | None = None
     host = DEFAULT_HOST
-    port = DEFAULT_PORT
+    port = _resolve_default_port()
     source = ""
 
     if record and _pid_alive(int(record["pid"])):
@@ -358,7 +406,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     # No live PID file. Is something untracked listening on the default/known port?
-    port = int(record.get("port", DEFAULT_PORT)) if record else DEFAULT_PORT
+    port = int(record.get("port", DEFAULT_PORT)) if record else _resolve_default_port()
     if record:
         # Stale file -- clean it up so subsequent runs are tidy.
         _clear_pidfile()
@@ -402,8 +450,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "start", help="Start the server (foreground by default)."
     )
     start_p.add_argument(
-        "--port", "-p", type=int, default=DEFAULT_PORT,
-        help=f"Port to listen on (default: {DEFAULT_PORT}).",
+        "--port", "-p", type=int, default=None,
+        help=(
+            "Port to listen on. Overrides [settings].port in default.config; "
+            f"if neither is set, defaults to {DEFAULT_PORT}."
+        ),
     )
     # --host is long-only on purpose: -h stays globally reserved for --help.
     start_p.add_argument(
@@ -428,7 +479,8 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     # the `start` subparser would have produced.
     if args.command is None:
         args.command = "start"
-        args.port = DEFAULT_PORT
+        # None -> cmd_start resolves the effective port (config, else default).
+        args.port = None
         args.host = DEFAULT_HOST
         args.reload = False
 

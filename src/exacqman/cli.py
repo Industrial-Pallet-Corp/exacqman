@@ -14,7 +14,7 @@ from exacqman.exacqman_config import (
     split_servers_and_cameras,
 )
 from exacqman.progress import init_reporter, get_reporter
-from exacqman import paths, __version__
+from exacqman import paths, __version__, DEFAULT_WEB_PORT
 import argparse
 import cv2
 import importlib.resources
@@ -1478,6 +1478,71 @@ def _credentials_are_populated(path: Path) -> bool:
                 or str(auth.get("password") or "").strip())
 
 
+def _write_settings_port(path: Path, port: int) -> tuple[bool, str]:
+    """Set ``port = <port>`` in the ``[settings]`` table of a TOML config file.
+
+    Edits in place, scoped to the ``[settings]`` section so we never touch a
+    ``port`` key that might appear elsewhere. Replaces an existing key or
+    appends one if missing. Refuses to write output that won't parse back as
+    TOML. Returns ``(ok, message)``.
+    """
+    try:
+        original = path.read_text()
+    except OSError as e:
+        return False, f"could not read {path.name}: {e}"
+
+    lines = original.splitlines(keepends=True)
+
+    settings_idx = next(
+        (i for i, ln in enumerate(lines) if ln.strip() == "[settings]"),
+        None,
+    )
+    if settings_idx is None:
+        return False, (
+            f"could not locate [settings] in {path.name}; left port unchanged"
+        )
+
+    section_end = len(lines)
+    for j in range(settings_idx + 1, len(lines)):
+        if lines[j].lstrip().startswith("["):
+            section_end = j
+            break
+
+    new_line = f"port = {port}\n"
+    replaced = False
+    for j in range(settings_idx + 1, section_end):
+        stripped = lines[j].strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key == "port":
+            lines[j] = new_line
+            replaced = True
+            break
+
+    if not replaced:
+        insert_at = section_end
+        if insert_at > 0 and lines[insert_at - 1] and not lines[insert_at - 1].endswith("\n"):
+            lines[insert_at - 1] = lines[insert_at - 1] + "\n"
+        lines.insert(insert_at, new_line)
+
+    new_content = "".join(lines)
+    try:
+        tomllib.loads(new_content)
+    except tomllib.TOMLDecodeError as e:
+        return False, (
+            f"aborted: the edit would produce invalid TOML ({e}); "
+            f"{path.name} port unchanged"
+        )
+
+    try:
+        path.write_text(new_content)
+    except OSError as e:
+        return False, f"could not write {path.name}: {e}"
+
+    return True, f"set web port to {port} in {path}"
+
+
 def _cmd_init(args) -> int:
     """Scaffold config + credentials into the standard config directory.
 
@@ -1518,11 +1583,13 @@ def _cmd_init(args) -> int:
             )
             return 1
 
+    config_written = False
     if target_config.exists() and not args.force:
         lines.append(f"  kept (exists): {target_config}")
     else:
         target_config.write_bytes((data / "default.config").read_bytes())
         lines.append(f"  wrote: {target_config}")
+        config_written = True
 
     creds_written = False
     if target_credentials.exists() and not args.force:
@@ -1551,6 +1618,27 @@ def _cmd_init(args) -> int:
             lines.append(
                 f"  left credentials empty: {target_credentials} (edit it later)"
             )
+
+    # Offer to set the web-UI port. Same gating as credentials: only on a real
+    # terminal and only when we freshly wrote the config this run (or --force
+    # re-scaffolded it), so an existing, untouched config is never rewritten.
+    # A blank answer keeps the bundled default; an invalid one is reported and
+    # left alone.
+    if sys.stdin.isatty() and (config_written or args.force):
+        raw_port = input(f"Web server port [{DEFAULT_WEB_PORT}]: ").strip()
+        if raw_port:
+            try:
+                chosen_port = int(raw_port)
+            except ValueError:
+                chosen_port = None
+            if chosen_port is None or not 1 <= chosen_port <= 65535:
+                lines.append(
+                    f"  invalid port '{raw_port}'; kept default "
+                    f"{DEFAULT_WEB_PORT} in {target_config}"
+                )
+            else:
+                ok, message = _write_settings_port(target_config, chosen_port)
+                lines.append(f"  {message}")
 
     print(f"ExacqMan config directory: {cfg_dir}")
     print("\n".join(lines))

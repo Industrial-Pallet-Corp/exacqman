@@ -84,6 +84,7 @@ compression_level = "high"          # low | medium | high
 font_weight = 3                     # 1 (thinnest) .. 5 (heaviest)
 default_crop = true
 default_crop_dimensions = [[0, 0], [1920, 1080]]
+port = 8887                         # web UI port (exacqman-web start)
 
 [ch]
 url = "http://192.168.1.100"
@@ -106,6 +107,7 @@ id = 2
 - `crop_dimensions` are `[[x, y], [width, height]]` integer arrays.
 - `timelapse_multiplier` must be a positive integer.
 - `font_weight` is an integer from `1` (thinnest) to `5` (heaviest); the overlay stroke scales with the export size so the perceived weight is consistent at any resolution.
+- `port` (optional) sets the web UI's listening port; defaults to `8887` if omitted. A `--port/-p` flag on `exacqman-web start` overrides it for that run.
 
 ## Output (exports)
 
@@ -202,7 +204,7 @@ exacqman-web status
 exacqman-web stop
 ```
 
-`start` runs a single foreground uvicorn process. Default port is **8887** (`--port/-p`); bind interface with `--host`. `stop`/`status` locate the server via a PID file (in the log directory) or by listener discovery on the port. See [`src/exacqman/web/README.md`](src/exacqman/web/README.md) for endpoints and the integration contract.
+`start` runs a single foreground uvicorn process. The port is resolved as `--port/-p` (if given) → `[settings].port` in `default.config` → the built-in **8887**; bind interface with `--host`. `stop`/`status` locate the server via a PID file (in the log directory) or by listener discovery on the port. See [`src/exacqman/web/README.md`](src/exacqman/web/README.md) for endpoints and the integration contract.
 
 ### Running the web UI as a service
 

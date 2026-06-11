@@ -317,6 +317,14 @@ def validate_config(config: dict) -> bool:
     ):
         fatal_errors.append('settings.credentials_file must be a non-empty string')
 
+    # Web-UI port. Optional: when absent, `exacqman-web` falls back to its
+    # built-in default. When present it must be a valid TCP port.
+    port = settings_table.get('port')
+    if port is not None and (
+        not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535
+    ):
+        fatal_errors.append('settings.port must be an integer between 1 and 65535')
+
     for warning in warnings:
         reporter.warning(warning)
 
