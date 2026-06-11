@@ -9,8 +9,7 @@ class CameraSelector {
         this.api = apiClient;
         this.state = stateManager;
         this.selectElement = document.getElementById('camera-select');
-        this.configSelect = document.getElementById('config-select');
-        
+
         this.init();
     }
 
@@ -33,13 +32,6 @@ class CameraSelector {
      * Set up event listeners
      */
     setupEventListeners() {
-        // Listen for config changes
-        if (this.configSelect) {
-            this.configSelect.addEventListener('change', (e) => {
-                this.handleConfigChange(e.target.value);
-            });
-        }
-
         // Listen for camera selection changes
         this.selectElement.addEventListener('change', (e) => {
             this.handleCameraChange(e.target.value);
@@ -66,28 +58,6 @@ class CameraSelector {
         this.state.subscribe('isLoading', (isLoading) => {
             this.updateLoadingState(isLoading);
         });
-    }
-
-    /**
-     * Handle configuration change
-     */
-    async handleConfigChange(configFile) {
-        if (!configFile) {
-            this.clearCameras();
-            return;
-        }
-
-        try {
-            this.state.setLoading(true);
-            const cameras = await this.api.getCameras(configFile);
-            this.state.updateCameras(cameras);
-        } catch (error) {
-            console.error('Failed to load cameras:', error);
-            this.showError('Failed to load cameras for selected configuration');
-            this.clearCameras();
-        } finally {
-            this.state.setLoading(false);
-        }
     }
 
     /**
@@ -196,18 +166,6 @@ class CameraSelector {
     }
 
     /**
-     * Clear camera list
-     */
-    clearCameras() {
-        if (!this.selectElement) return;
-
-        this.selectElement.innerHTML = '<option value="">Waiting for configuration...</option>';
-        this.selectElement.disabled = true;
-        this.selectElement.required = false;
-        this.state.set('selectedCamera', null);
-    }
-
-    /**
      * Validate current selection
      */
     validateSelection() {
@@ -237,11 +195,11 @@ class CameraSelector {
      * Check if form is ready for extraction
      */
     isFormReady() {
-        const configSelected = this.configSelect && this.configSelect.value;
+        const configLoaded = !!this.state.get('currentConfig');
         const cameraSelected = this.selectElement && this.selectElement.value;
         const dateTimeValid = this.state.get('dateTimeValid');
 
-        return configSelected && cameraSelected && dateTimeValid !== false;
+        return configLoaded && cameraSelected && dateTimeValid !== false;
     }
 
     /**
@@ -263,23 +221,6 @@ class CameraSelector {
         if (isLoading) {
             this.selectElement.innerHTML = '<option value="">Waiting for configuration...</option>';
         }
-    }
-
-    /**
-     * Show error message
-     */
-    showError(message) {
-        this.clearError();
-        
-        const errorElement = document.createElement('div');
-        errorElement.className = 'field-error';
-        errorElement.textContent = message;
-        errorElement.style.color = 'var(--error-color)';
-        errorElement.style.fontSize = 'var(--font-size-sm)';
-        errorElement.style.marginTop = 'var(--spacing-1)';
-        
-        this.selectElement.parentNode.appendChild(errorElement);
-        this.selectElement.classList.add('error');
     }
 
     /**

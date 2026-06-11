@@ -9,7 +9,6 @@ class AppState {
     constructor() {
         this.state = {
             // Configuration data
-            configs: [],
             cameras: [],
             servers: {},
             currentConfig: null,
@@ -179,14 +178,6 @@ class AppState {
     // Configuration management
 
     /**
-     * Update configuration data
-     * @param {Array} configs - Available configurations
-     */
-    updateConfigs(configs) {
-        this.set('configs', configs);
-    }
-
-    /**
      * Update cameras for current config
      * @param {Array} cameras - Available cameras
      */
@@ -250,8 +241,14 @@ class AppState {
     }
 
     /**
-     * All jobs this client has ever observed this session, sorted for display:
-     * running first, then waiting (in queue order), then terminal jobs newest-first.
+     * All jobs this client has ever observed this session, sorted for display
+     * in chronological top-to-bottom order:
+     *   1. waiting jobs, most-recently-queued on top (so the newest enqueued
+     *      job sits at the very top and the next-to-run job sits just above
+     *      the active one);
+     *   2. the single running ("active") job in the middle;
+     *   3. terminal (completed / failed) jobs newest-first, so the oldest
+     *      finished job lands at the very bottom.
      * @returns {Object[]}
      */
     getSessionJobsForDisplay() {
@@ -261,20 +258,28 @@ class AppState {
         const result = [];
         const taken = new Set();
 
-        if (running && sessionJobs.has(running.id)) {
-            result.push(sessionJobs.get(running.id));
-            taken.add(running.id);
-        }
-        waiting.forEach((job) => {
+        // Queued jobs at the top. `waiting` is in FIFO/queue order (index 0 is
+        // next to run, i.e. the earliest-queued); reverse it so the most
+        // recently queued job is on top and the next-to-run job sits closest
+        // to the active job below.
+        for (let i = waiting.length - 1; i >= 0; i--) {
+            const job = waiting[i];
             if (sessionJobs.has(job.id) && !taken.has(job.id)) {
                 result.push(sessionJobs.get(job.id));
                 taken.add(job.id);
             }
-        });
+        }
+
+        // Active job in the middle.
+        if (running && sessionJobs.has(running.id) && !taken.has(running.id)) {
+            result.push(sessionJobs.get(running.id));
+            taken.add(running.id);
+        }
 
         // Any remaining jobs in sessionJobs are terminal (or jobs the
         // current snapshot didn't include, which means they aged out
-        // server-side). Sort newest-completed first.
+        // server-side). Sort newest-completed first so the oldest finished
+        // job sits at the very bottom of the list.
         const terminal = [];
         sessionJobs.forEach((job, id) => {
             if (!taken.has(id)) terminal.push(job);
@@ -357,7 +362,6 @@ class AppState {
      */
     reset() {
         this.state = {
-            configs: [],
             cameras: [],
             servers: {},
             currentConfig: null,
@@ -392,7 +396,6 @@ class AppState {
     getSummary() {
         const { running, waiting } = this.state.queue;
         return {
-            configsCount: this.state.configs.length,
             camerasCount: this.state.cameras.length,
             runningJobs: running ? 1 : 0,
             waitingJobs: waiting.length,

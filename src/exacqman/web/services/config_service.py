@@ -217,16 +217,6 @@ class ConfigService:
             logger.exception("Error getting camera ID for %s", camera_alias)
             return None
 
-    def get_available_config_files(self) -> List[str]:
-        """List ``*.config`` files from the config dir and the cwd (deduped)."""
-        try:
-            config_files = [p.name for p in paths.iter_config_files()]
-            logger.info("Found %d configuration files", len(config_files))
-            return config_files
-        except Exception:
-            logger.exception("Error finding config files")
-            return []
-
     def validate_config_file(self, config_file: str) -> bool:
         """Lightweight structural check: file exists, parses as TOML, has a
         ``[settings]`` table and at least one server table. Deeper semantic

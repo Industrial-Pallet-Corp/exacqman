@@ -49,10 +49,11 @@ All under the `/api` prefix unless noted.
 | `GET` | `/api/files` | List finished exports. |
 | `GET` | `/api/download/{filename}` | Download an export. |
 | `DELETE` | `/api/files/{filename}` | Delete an export. |
-| `GET` | `/api/configs` | List discoverable `*.config` files (config dir + cwd). |
 | `GET` | `/api/config/{config_file}` | Cameras + servers + timelapse options for a config. |
 | `GET` | `/api/cameras/{config_file}` | Cameras for a config. |
 | `GET` | `/health`, `/api/health` | Health checks. |
+
+The web UI always operates on `default.config` (resolved from the config dir, then cwd) — there is no config picker. It loads that one config's servers and cameras on first page load and passes `config_file="default.config"` to every per-config endpoint and the extract request. The `{config_file}` endpoints remain parameterized so other callers can target any config by name.
 
 Static mounts: `/` serves the frontend; `/exports` serves finished videos.
 
