@@ -7,7 +7,6 @@ class LocalStorageService {
     constructor() {
         this.storageKey = 'exacqman_preferences';
         this.defaultPreferences = {
-            configFile: null,
             server: null,
             camera: null,
             timelapseMultiplier: 50, // Default to 50x
@@ -144,7 +143,7 @@ class LocalStorageService {
         }
 
         // Check for required structure (but allow null values)
-        const requiredKeys = ['configFile', 'server', 'camera', 'timelapseMultiplier'];
+        const requiredKeys = ['server', 'camera', 'timelapseMultiplier'];
         return requiredKeys.every(key => preferences.hasOwnProperty(key));
     }
 }

@@ -6,10 +6,11 @@
  * this component is a pure renderer that re-runs whenever ``sessionJobs``
  * changes.
  *
- * Job ordering (top to bottom): the currently-running job, then waiting
- * jobs in queue order, then terminal (completed / failed) jobs newest
- * first. Terminal jobs persist for the lifetime of this page load --
- * a refresh wipes them.
+ * Job ordering (top to bottom): waiting jobs with the most recently queued
+ * on top, then the currently-running job in the middle, then terminal
+ * (completed / failed) jobs newest-first so the oldest finished job sits at
+ * the very bottom. Terminal jobs persist for the lifetime of this page load
+ * -- a refresh wipes them.
  */
 
 class JobStatus {

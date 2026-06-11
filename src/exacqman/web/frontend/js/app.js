@@ -17,6 +17,11 @@ import QueuePoller from './components/queue-poller.js';
 import FileBrowser from './components/file-browser.js';
 import { confirmModal } from './utils/confirm-modal.js';
 
+// The web UI always operates on the single bundled `default.config`; there is
+// no in-app config switcher. Centralized here as the one source of truth for
+// the name passed to every per-config endpoint and the extract request.
+const DEFAULT_CONFIG = 'default.config';
+
 class ExacqManApp {
     constructor() {
         this.api = new ExacqManAPI();
@@ -34,7 +39,6 @@ class ExacqManApp {
         this.fileBrowser = null;
 
         // Bind methods to preserve context
-        this.handleConfigChange = this.handleConfigChange.bind(this);
         this.handleServerChange = this.handleServerChange.bind(this);
         this.handleExtractionSubmit = this.handleExtractionSubmit.bind(this);
         this.handleFileDownload = this.handleFileDownload.bind(this);
@@ -143,12 +147,6 @@ class ExacqManApp {
      * Set up DOM event listeners
      */
     setupEventListeners() {
-        // Configuration change
-        const configSelect = document.getElementById('config-select');
-        if (configSelect) {
-            configSelect.addEventListener('change', this.handleConfigChange);
-        }
-
         // Server selection change
         const serverSelect = document.getElementById('server-select');
         if (serverSelect) {
@@ -267,17 +265,11 @@ class ExacqManApp {
     async loadInitialData() {
         try {
             this.state.setLoading(true);
-            
-            // Load configuration files from API
-            const configFiles = await this.api.getAvailableConfigs();
-            const configs = configFiles.map(file => ({
-                name: file,
-                path: file
-            }));
-            
-            this.state.updateConfigs(configs);
-            this.populateConfigSelect(configs);
-            
+
+            // The UI always uses default.config -- load its servers/cameras
+            // straight away rather than offering a config picker.
+            await this.loadDefaultConfig();
+
             // Load processed videos
             await this.loadProcessedVideos();
             
@@ -286,6 +278,43 @@ class ExacqManApp {
             throw error;
         } finally {
             this.state.setLoading(false);
+        }
+    }
+
+    /**
+     * Load the servers and cameras for the single default.config and probe
+     * connectivity. Replaces the old config-picker flow: there is exactly one
+     * config, set on boot. If default.config is missing or unreadable the
+     * per-config endpoints 404/500; we surface a clear, actionable banner and
+     * leave the Server/Camera dropdowns disabled.
+     */
+    async loadDefaultConfig() {
+        try {
+            this.state.setCurrentConfig(DEFAULT_CONFIG);
+
+            const [cameras, configInfo] = await Promise.all([
+                this.api.getCameras(DEFAULT_CONFIG),
+                this.api.getConfigInfo(DEFAULT_CONFIG)
+            ]);
+
+            this.state.updateCameras(cameras);
+            this.state.updateServers(configInfo.servers || {});
+
+            // Reset any prior connectivity results before re-probing.
+            this.state.set('connectivity', { servers: {}, summary: null });
+
+            this.populateServerSelect(configInfo.servers || {});
+
+            // Background reachability probe; the form stays usable while it
+            // runs and the offline warning appears if a server is unreachable.
+            this.refreshConnectivity(DEFAULT_CONFIG);
+        } catch (error) {
+            console.error('Failed to load default.config:', error);
+            this.state.setCurrentConfig(null);
+            this.showError(
+                'Could not load default.config. Make sure it exists in the ' +
+                'config directory (run `exacqman init` to create it).'
+            );
         }
     }
 
@@ -309,8 +338,7 @@ class ExacqManApp {
         try {
             const preferences = window.LocalStorageService.loadPreferences();
             
-            // Note: Config preference is loaded in populateConfigSelect()
-            // Server and camera preferences are loaded when their respective
+            // Note: Server and camera preferences are loaded when their respective
             // components are populated (in populateServerSelect and CameraSelector.renderCameras)
             // Multiplier preference is loaded in MultiplierSelector.setDefaultValue()
             
@@ -337,64 +365,6 @@ class ExacqManApp {
     /**
      * Handle configuration file change
      */
-    async handleConfigChange(event) {
-        const configFile = event.target.value;
-        console.log('Config changed to:', configFile);
-        
-        if (!configFile) {
-            this.state.updateCameras([]);
-            this.state.updateServers({});
-            this.state.setCurrentConfig(null);
-            this.state.set('connectivity', { servers: {}, summary: null });
-            this.updateSelectedServerWarning();
-            // CameraSelector component will handle camera dropdown via state subscription
-            this.clearServerSelection();
-            return;
-        }
-
-        try {
-            this.state.setLoading(true);
-            this.state.setCurrentConfig(configFile);
-            
-            // Save preference to localStorage
-            window.LocalStorageService.savePreference('configFile', configFile);
-            
-            console.log('Loading cameras and config for:', configFile);
-            
-            // Load cameras and servers for selected config
-            const [cameras, configInfo] = await Promise.all([
-                this.api.getCameras(configFile),
-                this.api.getConfigInfo(configFile)
-            ]);
-            
-            console.log('Loaded cameras:', cameras);
-            console.log('Loaded config info:', configInfo);
-            
-            this.state.updateCameras(cameras);
-            this.state.updateServers(configInfo.servers || {});
-
-            // Reset any prior connectivity results before re-probing so stale
-            // annotations from a previously selected config don't linger.
-            this.state.set('connectivity', { servers: {}, summary: null });
-
-            // CameraSelector component will handle camera dropdown via state subscription
-            this.populateServerSelect(configInfo.servers || {});
-
-            console.log('Camera select populated with', cameras.length, 'cameras');
-
-            // Kick off a reachability probe in the background; the form stays
-            // usable while it runs and the offline warning appears if the
-            // selected server turns out to be unreachable.
-            this.refreshConnectivity(configFile);
-
-        } catch (error) {
-            console.error('Failed to load configuration:', error);
-            this.showError('Failed to load configuration. Please try again.');
-        } finally {
-            this.state.setLoading(false);
-        }
-    }
-
     /**
      * Handle extraction form submission
      */
@@ -497,7 +467,6 @@ class ExacqManApp {
      * Validate form using components
      */
     validateForm() {
-        const configValid = this.validateConfigSelection();
         const cameraValid = this.validateCameraSelection();
         const datetimeValid = this.dateTimePicker?.validateBoth();
         const multiplierValid = this.multiplierSelector?.validateSelection();
@@ -512,7 +481,6 @@ class ExacqManApp {
         }
 
         console.log('Form validation:', {
-            configValid,
             cameraValid,
             datetimeValid,
             multiplierValid,
@@ -522,7 +490,7 @@ class ExacqManApp {
             cameraSelectValue: this.cameraSelector?.getSelectedCamera()?.alias
         });
 
-        return configValid && cameraValid && datetimeValid && multiplierValid &&
+        return cameraValid && datetimeValid && multiplierValid &&
             serverValid && captionValid && filenameValid;
     }
 
@@ -542,23 +510,6 @@ class ExacqManApp {
         }
 
         ValidationUtils.clearFieldError(serverSelect);
-        return true;
-    }
-
-    /**
-     * Validate configuration selection
-     */
-    validateConfigSelection() {
-        const configSelect = document.getElementById('config-select');
-        if (!configSelect) return false;
-        
-        const selectedConfig = configSelect.value;
-        if (!selectedConfig || selectedConfig.trim() === '') {
-            ValidationUtils.showFieldError(configSelect, 'Please select a configuration file');
-            return false;
-        }
-        
-        ValidationUtils.clearFieldError(configSelect);
         return true;
     }
 
@@ -652,42 +603,6 @@ class ExacqManApp {
             }
         }
     }
-
-    /**
-     * Populate configuration select
-     */
-    populateConfigSelect(configs) {
-        const select = document.getElementById('config-select');
-        if (!select) return;
-        
-        select.innerHTML = '<option value="">Select configuration...</option>';
-        configs.forEach(config => {
-            const option = document.createElement('option');
-            option.value = config.path;
-            option.textContent = config.name;
-            select.appendChild(option);
-        });
-        select.disabled = false;
-        select.required = true;
-        
-        // Try to restore saved preference first
-        const savedConfig = window.LocalStorageService.loadPreference('configFile', null);
-        const preferredConfig = savedConfig && configs.some(config => config.path === savedConfig) ? savedConfig : null;
-        
-        // Auto-select if only one configuration
-        if (configs.length === 1) {
-            select.value = configs[0].path;
-            this.handleConfigChange({ target: { value: configs[0].path } });
-            console.log('Auto-selected configuration:', configs[0].name);
-        }
-        // Use saved preference if available and valid
-        else if (preferredConfig) {
-            select.value = preferredConfig;
-            this.handleConfigChange({ target: { value: preferredConfig } });
-            console.log('Restored saved config preference:', preferredConfig);
-        }
-    }
-
 
     /**
      * Populate server select

@@ -101,14 +101,6 @@ class ExacqManAPI {
     // Configuration endpoints
 
     /**
-     * Get available configuration files
-     * @returns {Promise<Array<string>>} List of configuration file names
-     */
-    async getAvailableConfigs() {
-        return await this.request('/configs');
-    }
-
-    /**
      * Get configuration information
      * @param {string} configFile - Configuration file path
      * @returns {Promise<Object>} Configuration info
