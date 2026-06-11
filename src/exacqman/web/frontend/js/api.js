@@ -7,14 +7,13 @@
 
 class ExacqManAPI {
     constructor(baseURL = null) {
-        // Auto-detect the base URL based on current host
+        // Default to the same origin the page was served from. window.location
+        // .origin already carries the exact protocol, host, and port, so the
+        // API is reached on whatever port the server is actually running on
+        // (the configurable [settings].port / --port) rather than a hardcoded
+        // one. Works behind reverse proxies and over https unchanged.
         if (!baseURL) {
-            const protocol = window.location.protocol;
-            const hostname = window.location.hostname;
-            const port = window.location.port || (protocol === 'https:' ? '443' : '80');
-            
-            // Use the current host for API calls
-            this.baseURL = `${protocol}//${hostname}:8887/api`;
+            this.baseURL = `${window.location.origin}/api`;
         } else {
             this.baseURL = baseURL;
         }
