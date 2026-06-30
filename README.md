@@ -80,7 +80,7 @@ When no `--config` is given, ExacqMan auto-discovers a `*.config` from the locat
 credentials_file = "default.credentials"
 timezone = "America/Indiana/Indianapolis"
 timelapse_multiplier = 50
-compression_level = "high"          # low | medium | high
+default_compression_level = "high"  # low | medium | high
 font_weight = 3                     # 1 (thinnest) .. 5 (heaviest)
 default_crop = true
 default_crop_dimensions = [[0, 0], [1920, 1080]]
@@ -95,6 +95,7 @@ url = "http://192.168.2.100"
 [ch.front_door]
 id = 1
 crop_dimensions = [[624, 14], [666, 766]]
+compression_level = "low"           # optional per-camera override
 
 [ch.back_door]
 id = 2
@@ -106,6 +107,7 @@ id = 2
 - Omit a camera's `crop_dimensions` to fall back to `[settings].default_crop_dimensions`; omit both to pick interactively (use the `crop` command to capture them).
 - `crop_dimensions` are `[[x, y], [width, height]]` integer arrays.
 - `timelapse_multiplier` must be a positive integer.
+- `default_compression_level` is `low`, `medium`, or `high`. Set `compression_level` inside a `[<server>.<alias>]` camera table to override it for that camera (symmetrical with `default_crop_dimensions` / `crop_dimensions`); a `--quality` flag overrides both.
 - `font_weight` is an integer from `1` (thinnest) to `5` (heaviest); the overlay stroke scales with the export size so the perceived weight is consistent at any resolution.
 - `port` (optional) sets the web UI's listening port; defaults to `8887` if omitted. A `--port/-p` flag on `exacqman-web start` overrides it for that run.
 

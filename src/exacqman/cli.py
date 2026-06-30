@@ -121,6 +121,9 @@ class Settings:
                 cam_crop = cam_data.get('crop_dimensions')
                 if cam_crop is not None:
                     entry['crop_dimensions'] = tuple(tuple(pt) for pt in cam_crop)
+                cam_compression = cam_data.get('compression_level')
+                if cam_compression is not None:
+                    entry['compression_level'] = cam_compression
                 cam_map[str(alias)] = entry
             cameras_by_server[srv_name] = cam_map
 
@@ -150,6 +153,14 @@ class Settings:
             default_crop = tuple(tuple(pt) for pt in default_crop)
         effective_crop = (cam_entry or {}).get('crop_dimensions') or default_crop
 
+        # Resolve effective compression the same way: a per-camera
+        # compression_level overrides the global [settings].default_compression_level.
+        # A CLI --quality flag still wins over both (handled by set_value below).
+        effective_compression = (
+            (cam_entry or {}).get('compression_level')
+            or settings_table.get('default_compression_level')
+        )
+
         return cls(
             username=auth.get('username', ''),
             password=auth.get('password', ''),
@@ -163,7 +174,7 @@ class Settings:
             ),
             compression_level=set_value(
                 arg_value='quality',
-                config_value=settings_table.get('compression_level'),
+                config_value=effective_compression,
                 cls_value=cls.compression_level,
             ),
             timezone=set_value(

@@ -39,6 +39,10 @@ from exacqman.progress import get_reporter
 # config is treated as a server (see split_servers_and_cameras).
 RESERVED_TABLES = frozenset({"settings"})
 
+# Accepted compression values, for both the global [settings].default_compression_level
+# and the per-camera [<server>.<alias>].compression_level override.
+VALID_COMPRESSION_LEVELS = ('low', 'medium', 'high')
+
 
 def split_servers_and_cameras(config: dict) -> tuple[dict[str, str], dict[str, dict]]:
     """Split a parsed config into its server-URL map and cameras-by-server map.
@@ -274,6 +278,13 @@ def validate_config(config: dict) -> bool:
                     '[[x, y], [w, h]] with integer values'
                 )
 
+            cam_compression = cam_data.get('compression_level')
+            if cam_compression is not None and cam_compression not in VALID_COMPRESSION_LEVELS:
+                fatal_errors.append(
+                    f"[{srv_name}.{alias}].compression_level must be one of: "
+                    "'low', 'medium', 'high'"
+                )
+
     # [settings]
     settings_table = config['settings']
 
@@ -287,11 +298,11 @@ def validate_config(config: dict) -> bool:
     elif not isinstance(multiplier, int) or isinstance(multiplier, bool) or multiplier <= 0:
         fatal_errors.append('settings.timelapse_multiplier must be a positive integer')
 
-    compression_level = settings_table.get('compression_level')
-    if compression_level is None or (isinstance(compression_level, str) and not compression_level.strip()):
-        warnings.append('settings.compression_level is missing. Program will default to medium')
-    elif compression_level not in ('low', 'medium', 'high'):
-        fatal_errors.append("settings.compression_level must be one of: 'low', 'medium', 'high'")
+    default_compression_level = settings_table.get('default_compression_level')
+    if default_compression_level is None or (isinstance(default_compression_level, str) and not default_compression_level.strip()):
+        warnings.append('settings.default_compression_level is missing. Program will default to medium')
+    elif default_compression_level not in VALID_COMPRESSION_LEVELS:
+        fatal_errors.append("settings.default_compression_level must be one of: 'low', 'medium', 'high'")
 
     font_weight = settings_table.get('font_weight')
     if font_weight is None:
