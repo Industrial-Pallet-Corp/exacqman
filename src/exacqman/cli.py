@@ -723,10 +723,11 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
         codec (str): Compression codec (default: 'libx264').
 
     Returns:
-        str: The filepath of the compressed video.
+        str: The filepath of the compressed video. When the level is 'none',
+        compression is bypassed and the (unchanged) input path is returned.
 
     Raises:
-        ValueError: If the quality is not 'low', 'medium', or 'high'.
+        ValueError: If the quality is not 'none', 'low', 'medium', or 'high'.
     """
 
     # Ensure the input file has the correct extension
@@ -734,6 +735,16 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
         original_video_path += '.mp4'
 
     quality = settings.compression_level
+
+    # 'none' bypasses compression: no re-encode, no resolution cap. The
+    # timelapsed (already cropped) input is the final artifact, so return it
+    # untouched -- the caller tags + delivers it. No "compression" stage event
+    # is emitted, since nothing is processed here.
+    if quality == 'none':
+        get_reporter().info(
+            "Compression disabled (compression_level = 'none'); keeping native quality"
+        )
+        return original_video_path
 
     # If not specified, rename the output file to the same as input with codec and bitrate appended to it (e.g. video_libx264_500K.mp4)
     if compressed_video_path is None:
@@ -749,7 +760,7 @@ def compress_video(original_video_path: str, compressed_video_path: str = None, 
         bitrate = '1M'
         resolution = (1920, 1080)
     else:
-        raise ValueError("Compression quality must be one of: 'low', 'medium', 'high'")
+        raise ValueError("Compression quality must be one of: 'none', 'low', 'medium', 'high'")
 
     if settings.crop:
         resolution = settings.crop_dimensions[1] # crop_dimensions[1] gives (width,height)
@@ -910,7 +921,7 @@ def parse_arguments():
             'the current working directory with their stem-based names.'
         ),
     )
-    extract_parser.add_argument('--quality', type=str, choices=['low', 'medium', 'high'], help='Desired video quality')
+    extract_parser.add_argument('--quality', type=str, choices=['none', 'low', 'medium', 'high'], help='Desired video quality ("none" bypasses compression)')
     extract_parser.add_argument('--multiplier', type=int, help='Desired timelapse multiplier (must be a positive integer)')
     extract_parser.add_argument('-c', '--crop', type=_parse_bool_flag, default=None, metavar='{true,false}', help='Crop the video (true/false). When unset, defers to [settings].default_crop in the config. Uses per-camera crop_dimensions, falling back to default_crop_dimensions; prompts if neither is set.')
     extract_parser.add_argument('--caption', type=str, help=f'Add caption below timestamp (max of {Settings.caption_limit} chars)')

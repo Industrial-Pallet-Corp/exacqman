@@ -40,8 +40,9 @@ from exacqman.progress import get_reporter
 RESERVED_TABLES = frozenset({"settings"})
 
 # Accepted compression values, for both the global [settings].default_compression_level
-# and the per-camera [<server>.<alias>].compression_level override.
-VALID_COMPRESSION_LEVELS = ('low', 'medium', 'high')
+# and the per-camera [<server>.<alias>].compression_level override. 'none' bypasses
+# the compression/re-encode step entirely (keeps native, post-crop quality).
+VALID_COMPRESSION_LEVELS = ('none', 'low', 'medium', 'high')
 
 
 def split_servers_and_cameras(config: dict) -> tuple[dict[str, str], dict[str, dict]]:
